@@ -356,12 +356,26 @@ def train_distill():
                 #  THE AUDIT (Every 500 Steps) 
                 if global_step % 200 == 0:
                     audit_expert_specialization(student, cka_fn, [input_ids], global_step)
-                    torch.save(student.state_dict(), CHECKPOINT_ROOT / f"step-{global_step}.pth")
+                    # torch.save(student.state_dict(), CHECKPOINT_ROOT / f"step-{global_step}.pth")
+                    checkpoint = {
+                        'step': global_step,
+                        'model_state_dict': student.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'scheduler_state_dict': scheduler.state_dict(),
+                    }
+                    torch.save(checkpoint, CHECKPOINT_ROOT / f"step-{global_step}.pth")
 
 
     # Save the final student state separately
     final_path = CHECKPOINT_ROOT / "lit_model.pth"
-    torch.save(student.state_dict(), final_path)
+    # torch.save(student.state_dict(), final_path)
+    checkpoint = {
+        'step': global_step,
+        'model_state_dict': student.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+    }
+    torch.save(checkpoint, CHECKPOINT_ROOT / "lit_model.pth")
     audit_expert_specialization(student, cka_fn, [input_ids], global_step)
 
 

@@ -22,6 +22,7 @@ class GPT(nn.Module):
         super().__init__()
         assert config.padded_vocab_size is not None
         self.config = config
+        self.global_step = 0
 
         self.lm_head = nn.Linear(config.n_embd, config.padded_vocab_size, bias=config.lm_head_bias)
         self.transformer = nn.ModuleDict(
@@ -717,40 +718,82 @@ class LLaMAMoE(nn.Module):
         self.config = config
         self.last_expert_outputs = None 
         self.last_indices = None 
+        self.last_hidden_input = None
+        self.last_router_probs = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, C = x.size()
-        residual_x = x.clone()
+        residual_x = x
         x_flat = x.view(-1, C)
-        router = self.gate(x_flat)
-        
-        # Capture Top-K indices
-        probs, indices = torch.topk(router, self.config.n_expert_per_token)
-        
-        # Store indices during training to check for Expert Collapse
-        if self.training:
-            self.last_indices = indices.detach() # Detach to save memory
-            
-        probs = probs.softmax(dim=1, dtype=torch.float).to(dtype=x.dtype)
+        self.last_hidden_input = x_flat.detach()
+        # router = self.gate(x_flat)
+        router_logits = self.gate(x_flat)
 
+        # probs = probs.softmax(dim=1, dtype=torch.float).to(dtype=x.dtype)
+        router_probs = F.softmax(router_logits, dim=-1)
+        self.last_router_probs = router_probs.detach()
+
+        # probs, indices = torch.topk(router, self.config.n_expert_per_token)
+        probs, indices = torch.topk(router_probs, self.config.n_expert_per_token)
+        probs = probs / probs.sum(dim=-1, keepdim=True) # normalize prob to sum to 1.
+        
+        # Store indices to check for Expert Collapse
+        self.last_indices = indices.detach() # Detach to save memory
+            
         if self.config.routed_scaling_factor != 1.0:
             probs = probs * self.config.routed_scaling_factor
-            
-        masks = indices.unsqueeze(-1) == torch.arange(self.config.n_expert, device=x.device)
+        
+        # # build routing masks for experts
+        # masks = indices.unsqueeze(-1) == torch.arange(self.config.n_expert, device=x.device)
+        # masks = masks.permute(2, 0, 1)
+
+        # -------------------------------------------------------
+        # Expert Capacity Control (Vectorized)
+        # -------------------------------------------------------
+
+        tokens = x_flat.shape[0]
+        k = self.config.n_expert_per_token
+        E = self.config.n_expert
+
+        capacity_factor = 1.25
+        capacity = int((tokens * k / E) * capacity_factor)
+
+        # flatten routing assignments
+        flat_experts = indices.reshape(-1)
+        # count tokens assigned to each expert
+        expert_counts = torch.bincount(flat_experts, minlength=E)
+        # detect experts exceeding capacity
+        overflow = expert_counts > capacity
+        # build mask for overflow routes
+        overflow_mask = overflow[indices]
+        # invalidate overflowing assignments
+        probs = probs.masked_fill(overflow_mask, 0.0)
+        # renormalize routing probabilities
+        probs = probs / (probs.sum(dim=-1, keepdim=True) + 1e-9)
+
+        # -------------------------------------------------------
+        # Build expert routing masks
+        # -------------------------------------------------------
+        expert_range = torch.arange(E, device=x.device)
+        # shape: [tokens, top_k, experts]
+        masks = indices.unsqueeze(-1) == expert_range
+        # remove overflow routes
+        masks = masks & (~overflow_mask.unsqueeze(-1))
+        # shape: [experts, tokens, top_k]
         masks = masks.permute(2, 0, 1)
-        y = torch.zeros_like(x_flat)
 
-        current_expert_activations = [] 
+        y = torch.zeros_like(x_flat, dtype=x_flat.dtype)
 
-        for mask, expert in zip(masks, self.experts):
-            token_idx, top_k_idx = torch.where(mask)
-            if token_idx.numel() > 0:
-                weighted_out = probs[token_idx, top_k_idx, None] * expert(x_flat[token_idx])
-                y[token_idx] += weighted_out 
-                if self.training:
-                    current_expert_activations.append(weighted_out)
+        expert_outputs_full = []
 
-        self.last_expert_outputs = current_expert_activations 
+        for expert in self.experts:
+
+            out = expert(x_flat)
+
+            expert_outputs_full.append(out)
+
+        # shape: [E, tokens, hidden]
+        self.last_expert_outputs = torch.stack(expert_outputs_full).detach()
 
         y = y.view(B, T, C)
         if self.config.n_shared_expert:
@@ -1035,28 +1078,5 @@ class RMSNorm(torch.nn.Module):
 
     def reset_parameters(self) -> None:
         torch.nn.init.ones_(self.weight)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 

@@ -9,7 +9,7 @@ from pathlib import Path
 import os
 
 # --- CONFIGURATION ---
-log_file = "outputs/16_02_run_test_39k_full_run/training_log.csv"
+log_file = "outputs/16_03_run_test_80k_D851BF_collapse/training_log.csv"
 output_dir = Path(log_file).parent
 # output_dir = "outputs/plots/" # Folder to save individual plots
 

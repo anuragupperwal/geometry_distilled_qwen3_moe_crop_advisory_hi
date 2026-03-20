@@ -22,19 +22,23 @@ from litgpt.utils import chunked_cross_entropy
 
 #config
 
-RUN_TAG = "02_03_run_test_80k"  # <--- EDIT THIS PER RUN
+RUN_TAG = "16_03_run_test_80k"  # <--- EDIT THIS PER RUN
 
 DISTILL_CONFIG = {
-    "alpha": 0.5,
-    "lambda": 0.5,  
-    "beta": 1.0, 
-    "gamma": 1.5, 
-    "T": 2.0 
+    "alpha": 0.5,   # KL
+    "lambda": 0.5,  # CE
+    "beta": 0.2,    # CKA
+    "gamma": 0.2,   # load balance
+    "delta": 0.2, #div 
+    "T": 2,
 }
+
+
 MAX_SEQ_LENGTH = 4096
 BATCH_SIZE = 2 
 ACCUMULATE_GRAD_STEPS = 8  # 1 * 4 = Effective Batch Size 4 (Better stability)
 NUM_EPOCHS = 1
+WARMUP_STEPS = 500
 
 # Generate a short 6-char unique ID (e.g., 'A9D2') to prevent overwrites
 short_id = uuid.uuid4().hex[:6].upper()
@@ -76,114 +80,448 @@ print(f"Parameters saved to: {config_path}")
 class LossLogger:
     def __init__(self, log_dir):
         self.file_path = log_dir / "training_log.csv"
-        self.headers = ["step", "total_loss", "kl_loss", "ce_loss", "cka_loss", "div_loss", "max_load"]
+        self.headers = ["step", "total_loss", "kl_loss", "ce_loss", "cka_loss", "div_loss", "router_loss", "max_load"]
         with open(self.file_path, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(self.headers)
 
-    def log(self, step, total, kl, ce, cka, div, load):
+    def log(self, step, total, kl, ce, cka, div, router, load):
         with open(self.file_path, 'a', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow([step, f"{total:.6f}", f"{kl:.6f}", f"{ce:.6f}", f"{cka:.6f}", f"{div:.6f}", f"{load:.4f}"])
+            writer.writerow([step, f"{total:.6f}", f"{kl:.6f}", f"{ce:.6f}", f"{cka:.6f}", f"{div:.6f}", f"{router:.6f}", f"{load:.4f}"])
 
 
 #CKA Loss
 class LinearCKALoss(nn.Module):
     """
-    Minibatch Linear CKA for feature manifold alignment.
-    Handles different hidden dimensions (1024 vs 5120) naturally.
+    Stable minibatch Linear CKA for representation geometry alignment.
+    Works with different hidden sizes.
     """
-    def forward(self, x, y):
-        # x (Student): [B*T, 1024], y (Teacher): [B*T, 5120]
-        x = x.view(-1, x.size(-1)).to(torch.float32)
-        y = y.view(-1, y.size(-1)).to(torch.float32)
+    def forward(self,x,y):
+
+        B,T,D1 = x.shape
+        _,_,D2 = y.shape
+
+        x = x.reshape(-1,D1).float()
+        y = y.reshape(-1,D2).float()
+
+        x = x - x.mean(0,keepdim=True)
+        y = y - y.mean(0,keepdim=True)
+
+        hsic = torch.norm(x.T @ y,p="fro")**2
+        norm_x = torch.norm(x.T @ x,p="fro")
+        norm_y = torch.norm(y.T @ y,p="fro")
+
+        cka = hsic/(norm_x*norm_y + 1e-8)
+
+        return 1-cka
+
+
+# ------------------------------------------------------------
+# TOKEN SAMPLING FOR MINIBATCH CKA
+# ------------------------------------------------------------
+def sample_tokens(x,max_tokens=3072):
+
+    B,T,D = x.shape
+    total = B*T
+
+    if total <= max_tokens:
+        return x
+
+    idx = torch.randperm(total,device=x.device)[:max_tokens]
+
+    x = x.reshape(total,D)[idx]
+
+    return x.view(1,-1,D)
+
+
+
+def paired_token_sample(x, y, max_tokens=3072):
+
+    B,T,Dx = x.shape
+    _,_,Dy = y.shape
+
+    x = x.reshape(-1, Dx)
+    y = y.reshape(-1, Dy)
+
+    total = x.shape[0]
+
+    if total <= max_tokens:
+        return x.view(1,-1,Dx), y.view(1,-1,Dy)
+
+    idx = torch.randperm(total, device=x.device)[:max_tokens]
+
+    x = x[idx]
+    y = y[idx]
+
+    return x.unsqueeze(0), y.unsqueeze(0)
+
+# ------------------------------------------------------------
+# SWITCH TRANSFORMER LOAD BALANCE LOSS
+# ------------------------------------------------------------
+def compute_load_balance_loss(student,n_experts):
+
+    losses=[]
+
+    for layer in student.transformer.h:
+
+        if not hasattr(layer.mlp,"last_router_probs"):
+            continue
+
+        probs=layer.mlp.last_router_probs
+        indices=layer.mlp.last_indices
+
+        if probs is None:
+            continue
+
+        tokens=probs.shape[0]
+
+        importance = probs.mean(0) + 1e-6
+        importance = importance / importance.sum()
+
+        load=torch.bincount(
+            indices.view(-1),
+            minlength=n_experts
+        ).float()/tokens
+        load = load / (load.sum() + 1e-6)
         
-        # Center the features
-        x = x - x.mean(dim=0)
-        y = y - y.mean(dim=0)
+        balance = torch.clamp((importance * load).sum() * n_experts, 0, 2)
+        losses.append(balance)
+
+    if len(losses)==0:
+        return torch.tensor(0.0,device=probs.device)
+
+    return torch.stack(losses).mean()
+
+
+# ------------------------------------------------------------
+# INTERPRETABILITY: TEACHER vs EXPERT CKA
+# ------------------------------------------------------------
+
+@torch.no_grad()
+def audit_teacher_expert_alignment(student,teacher,cka_fn,batch,step):
+    student.eval()
+    teacher.eval()
+
+    device = next(teacher.parameters()).device
+    input_ids = batch[0].to(device)
+    
+    t_logits,t_features=teacher(input_ids,return_features=True)
+    s_logits,s_features=student(input_ids,return_features=True)
+
+    target_layer=len(s_features)//2
+    teacher_feat=t_features[target_layer]
+
+    block=student.transformer.h[target_layer]
+
+    if not hasattr(block.mlp,"experts"):
+        return
+
+    experts=block.mlp.experts
+    hidden = block.mlp.last_hidden_input
+    hidden = hidden.contiguous().view(1, -1, hidden.size(-1))
+
+    matrix=torch.zeros(len(experts), device=hidden.device)
+
+    teacher_feat = teacher_feat.contiguous().view(1,-1,teacher_feat.size(-1))
+
+    for i,expert in enumerate(experts):
+
+        out = expert(hidden.view(-1, hidden.size(-1)))
+        out = out.view(1,-1,hidden.size(-1))
+
+        out_sample, teacher_sample = paired_token_sample(out, teacher_feat)
+
+        sim = 1 - cka_fn(out_sample, teacher_sample)
+
+        matrix[i]=sim
+
+    save_dir = OUTPUT_ROOT / "audits"
+    save_path=save_dir/f"teacher_expert_alignment_{step}.pt"
+    torch.save(matrix,save_path)
+    
+    plot_cka_heatmap(
+        save_path,
+        save_path.with_suffix(".png"),
+        title=f"Teacher-Expert Alignment Step {step}"
+    )
+
+
+    print(f"Teacher alignment avg: {matrix.mean().item():.4f}")
+
+
+
+# @torch.no_grad()
+# def audit_expert_specialization(student, cka_fn, batch, step):
+#     """
+#     Live Training Audit: Uses a forward hook to capture real contextual 
+#     hidden states from the current batch and calculates expert similarity.
+#     """
+#     student.eval()
+#     device = next(student.parameters()).device
+    
+#     # 1. Prepare data from the current batch
+#     input_ids = batch[0].to(device) # batch is (input_ids, loss_mask)
+#     # Slice to a small context for speed/VRAM during audit
+#     if input_ids.size(1) > 512:
+#         input_ids = input_ids[:, :512]
+    
+#     save_dir = OUTPUT_ROOT / "audits"
+#     matrix_path = save_dir / f"cka_matrix_step_{step}.pth"
+    
+#     # 2. Setup the Hook to capture Layer 14 (Middle) input
+#     target_layer_idx = student.config.n_layer // 2
+#     target_block = student.transformer.h[target_layer_idx]
+    
+#     captured_input = {}
+#     def hook_fn(module, args, output):
+#         # args[0] is the hidden state entering the MLP/Expert block
+#         captured_input['hidden_state'] = args[0].detach()
+
+#     handle = target_block.mlp.register_forward_hook(hook_fn)
+    
+#     # 3. Run a mini-forward pass to trigger the hook
+#     try:
+#         student(input_ids)
+#     finally:
+#         handle.remove() # Always remove hooks to prevent memory leaks
+    
+#     real_hidden_state = captured_input['hidden_state']
+#     layer = target_block.mlp
+    
+#     if hasattr(layer, 'experts'):
+#         print(f"\nStep {step}: Expert Specialization Audit (Real-Data Hook)")
         
-        dot_product = torch.norm(torch.matmul(x.t(), y))**2
-        norm_x = torch.norm(torch.matmul(x.t(), x))
-        norm_y = torch.norm(torch.matmul(y.t(), y))
+#         # 4. Pass captured real states through each expert
+#         expert_outputs = []
+#         for expert in layer.experts:
+#             expert_outputs.append(expert(real_hidden_state).detach())
         
-        cka_score = dot_product / (norm_x * norm_y + 1e-6)
-        return 1 - cka_score
+#         n_exp = len(expert_outputs)
+#         cka_matrix = torch.zeros((n_exp, n_exp), device=real_hidden_state.device)
+#         latent_dim = real_hidden_state.size(-1)
+        
+#         for i in range(n_exp):
+#             for j in range(n_exp):
+#                 # We calculate similarity (1.0 = identical)
+#                 # Note: If your cka_fn in train_distill returns (1 - score), 
+#                 # make sure to adjust this to store (1 - result) for a similarity heatmap.
+#                 xi = expert_outputs[i].view(1, -1, latent_dim)
+#                 xj = expert_outputs[j].view(1, -1, latent_dim)
+#                 sim = 1 - cka_fn(xi, xj)
+#                 cka_matrix[i, j] = sim
+        
+#         # 5. Save and Plot
+#         torch.save(cka_matrix, matrix_path)
+        
+#         # Call your existing plotting function (Ensure it handles Similarity)
+#         print(f"Expert similarity avg: {cka_matrix.mean().item():.4f}")
+
+#         plot_cka_heatmap(
+#             matrix_path,
+#             save_path=save_dir / f"heatmap_step_{step}.png",
+#             title=f"Expert CKA Similarity (Step {step})"
+#         )        
+#         avg_sim = cka_matrix.mean().item()
+#         print(f"Layer {target_layer_idx} Avg Expert Similarity: {avg_sim:.4f}")
+    
+#     student.train()
+
+
+
 
 
 
 @torch.no_grad()
-def audit_expert_specialization(student, cka_fn, batch, step):
+def audit_expert_specialization(
+    student,
+    cka_fns,  # dict: {"linear": fn, "unbiased": fn}
+    batch,
+    step,
+    use_router=False,
+    layers_to_probe=None
+):
     """
-    Live Training Audit: Uses a forward hook to capture real contextual 
-    hidden states from the current batch and calculates expert similarity.
+    Performs:
+    - Capacity similarity (default)
+    - Usage similarity (if use_router=True)
+    - Multiple CKA estimators
+    - Multi-layer auditing
     """
-    student.eval()
-    device = next(student.parameters()).device
-    
-    # 1. Prepare data from the current batch
-    input_ids = batch[0] # batch is (input_ids, loss_mask)
-    # Slice to a small context for speed/VRAM during audit
-    if input_ids.size(1) > 256:
-        input_ids = input_ids[:, :256]
-    
-    save_dir = OUTPUT_ROOT / "audits"
-    matrix_path = save_dir / f"cka_matrix_step_{step}.pth"
-    
-    # 2. Setup the Hook to capture Layer 14 (Middle) input
-    target_layer_idx = student.config.n_layer // 2
-    target_block = student.transformer.h[target_layer_idx]
-    
-    captured_input = {}
-    def hook_fn(module, args, output):
-        # args[0] is the hidden state entering the MLP/Expert block
-        captured_input['hidden_state'] = args[0].detach()
 
-    handle = target_block.mlp.register_forward_hook(hook_fn)
-    
-    # 3. Run a mini-forward pass to trigger the hook
-    try:
-        student(input_ids)
-    finally:
-        handle.remove() # Always remove hooks to prevent memory leaks
-    
-    real_hidden_state = captured_input['hidden_state']
-    layer = target_block.mlp
-    
-    if hasattr(layer, 'experts'):
-        print(f"\nStep {step}: Expert Specialization Audit (Real-Data Hook)")
-        
-        # 4. Pass captured real states through each expert
-        expert_outputs = [expert(real_hidden_state) for expert in layer.experts]
-        
+    student.eval()
+
+    device = next(student.parameters()).device
+    input_ids = batch[0].to(device)
+
+    if input_ids.size(1) > 512:
+        input_ids = input_ids[:, :512]
+
+    if layers_to_probe is None:
+        layers_to_probe = [
+            0,
+            student.config.n_layer // 2,
+            student.config.n_layer - 1
+        ]
+
+    for layer_idx in layers_to_probe:
+
+        target_block = student.transformer.h[layer_idx]
+
+        captured = {}
+
+        def hook_fn(module, args, output):
+            captured["h"] = args[0].detach()
+
+        handle = target_block.mlp.register_forward_hook(hook_fn)
+
+        try:
+            student(input_ids)
+        finally:
+            handle.remove()
+
+        h = captured["h"]
+        layer = target_block.mlp
+
+        if not hasattr(layer, "experts"):
+            continue
+
+        print(f"\nStep {step} | Layer {layer_idx}")
+
+        # ---------- ROUTER ----------
+        if use_router and hasattr(layer.mlp, "router"):
+            router_probs = getattr(layer.mlp, "last_router_probs", None)
+        else:
+            router_probs = None
+
+        # ---------- EXPERT OUTPUTS ----------
+        expert_outputs = []
+        for i, expert in enumerate(layer.experts):
+            out = expert(h)
+
+            if router_probs is not None:
+                weight = router_probs[..., i].unsqueeze(-1)
+                out = out * weight
+
+            expert_outputs.append(out)
+
         n_exp = len(expert_outputs)
-        cka_matrix = torch.zeros((n_exp, n_exp))
-        latent_dim = real_hidden_state.size(-1)
-        
-        for i in range(n_exp):
-            for j in range(n_exp):
-                # We calculate similarity (1.0 = identical)
-                # Note: If your cka_fn in train_distill returns (1 - score), 
-                # make sure to adjust this to store (1 - result) for a similarity heatmap.
-                sim = 1 - cka_fn(expert_outputs[i].view(-1, latent_dim), 
-                                 expert_outputs[j].view(-1, latent_dim))
-                cka_matrix[i, j] = sim
-        
-        # 5. Save and Plot
-        torch.save(cka_matrix, matrix_path)
-        
-        # Call your existing plotting function (Ensure it handles Similarity)
-        plot_cka_heatmap(matrix_path, save_path=save_dir / f"heatmap_step_{step}.png")
-        
-        avg_sim = cka_matrix.mean().item()
-        print(f"Layer {target_layer_idx} Avg Expert Similarity: {avg_sim:.4f}")
-    
+        latent_dim = h.size(-1)
+
+        # ---------- CKA MATRICES ----------
+        for name, cka_fn in cka_fns.items():
+
+            cka_matrix = torch.zeros((n_exp, n_exp), device=h.device)
+
+            for i in range(n_exp):
+                for j in range(i, n_exp):
+                    sim = 1 - cka_fn(
+                        expert_outputs[i].view(-1, latent_dim),
+                        expert_outputs[j].view(-1, latent_dim)
+                    )
+                    cka_matrix[i, j] = sim
+
+            avg_sim = cka_matrix.mean().item()
+
+            mode = "USAGE" if use_router else "CAPACITY"
+
+            print(f"[{mode}] [{name}] Avg similarity: {avg_sim:.4f}")
+
+            # Save
+            save_dir = OUTPUT_ROOT / "audits"
+            save_dir.mkdir(exist_ok=True, parents=True)
+
+            torch.save(
+                cka_matrix,
+                save_dir / f"cka_{mode}_{name}_layer{layer_idx}_step{step}.pth"
+            )
+
+            plot_cka_heatmap(
+                save_dir / f"cka_{mode}_{name}_layer{layer_idx}_step{step}.pth",
+                save_path=save_dir / f"heatmap_{mode}_{name}_layer{layer_idx}_step{step}.png"
+            )
+
     student.train()
+
+
+def expert_diversity_cka(student):
+
+    losses = []
+    linear_cka = LinearCKALoss()
+    for layer in student.transformer.h:
+
+        if not hasattr(layer.mlp, "last_expert_outputs"):
+            continue
+
+        expert_outputs = layer.mlp.last_expert_outputs
+
+        if expert_outputs is None:
+            continue
+
+        E = expert_outputs.shape[0]
+
+        pairs = torch.randperm(E)[:4]
+
+        for i in pairs:
+            for j in pairs:
+                if i >= j:
+                    continue
+
+                Xi = expert_outputs[i].unsqueeze(0)
+                Xj = expert_outputs[j].unsqueeze(0)
+
+                cka_val = 1-linear_cka(Xi, Xj)
+
+                losses.append(cka_val)
+
+    if len(losses) == 0:
+        return torch.tensor(0.0, device=student.lm_head.weight.device)
+
+    return torch.stack(losses).mean()
+
+
+
+def expert_diversity_loss(student):
+
+    losses = []
+
+    for layer in student.transformer.h:
+
+        if not hasattr(layer.mlp, "experts"):
+            continue
+
+        if not hasattr(layer.mlp, "last_hidden_input"):
+            continue
+
+        hidden = layer.mlp.last_hidden_input.detach()
+
+        experts = layer.mlp.experts
+        outputs = []
+
+        for expert in experts:
+            out = expert(hidden.view(-1, hidden.size(-1)))
+            outputs.append(out)
+
+        for i in range(len(outputs)):
+            for j in range(i + 1, len(outputs)):
+
+                sim = F.cosine_similarity(
+                    outputs[i],
+                    outputs[j],
+                    dim=-1
+                ).mean()
+
+                losses.append(sim)
+
+    if len(losses) == 0:
+        return torch.tensor(0.0, device=hidden.device)
+
+    return torch.stack(losses).mean()
 
 
 def train_distill():
     start_time = datetime.now()
     device = torch.device("cuda") 
-    logger = LossLogger(OUTPUT_ROOT)
 
     tokenizer = Tokenizer("checkpoints/Qwen/Qwen3-0.6B")
     dataset = AgriDataset(
@@ -191,6 +529,10 @@ def train_distill():
             tokenizer=tokenizer, 
             max_seq_length=MAX_SEQ_LENGTH 
         )
+    cka_fns = {
+        "linear": LinearCKA(),
+        "unbiased": UnbiasedLinearCKA()
+    }
 
     data_loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
 
@@ -206,24 +548,42 @@ def train_distill():
     student = GPT(Config.from_name("Qwen3-0.6B-MoE")).to(device, dtype=torch.bfloat16)
     student.load_state_dict(torch.load(STUDENT_INIT, map_location=device, weights_only=True))
 
-    #adding guassian noise
-    print("Applying (Gaussian noise) Symmetry Breaking to Experts...")
+    for p in teacher.parameters():
+        p.requires_grad=False
+
+    #adding guassian noise (5% of weight std)
+    print("Applying symmetry-breaking noise to experts...")
     with torch.no_grad():
         for name, param in student.named_parameters():
+
             if "mlp.experts" in name and "weight" in name:
-                param.add_(torch.randn_like(param) * 1e-4)
+                weight_std = param.std()
+                noise = torch.randn_like(param) * weight_std * 0.02
+                param.add_(noise)
 
     # Enable Gradient Checkpointing on Student to save VRAM, critical for the H100 80GB when running two models
     student.gradient_checkpointing_enable()
 
+    optimizer=torch.optim.AdamW(
+            student.parameters(),
+            lr=5e-5,
+            weight_decay=0.01
+        )
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    scheduler = CosineAnnealingLR(
+            optimizer,
+            T_max=len(data_loader) * NUM_EPOCHS
+        )
+    
     # Slightly higher LR because we are using a Scheduler now
     # optimizer = bnb.optim.AdamW8bit(student.parameters(), lr=5e-5) # 8-bit AdamW saves ~2GB
-    optimizer = torch.optim.AdamW(student.parameters(), lr=5e-5, eps=1e-8)
+    # optimizer = torch.optim.AdamW(student.parameters(), lr=5e-5, eps=1e-8, weight_decay=0.01)
 
 
     # Calculate total steps for scheduler
-    total_steps = len(data_loader) * NUM_EPOCHS
-    scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-6)
+    # total_steps = (len(data_loader) * NUM_EPOCHS) // ACCUMULATE_GRAD_STEPS
+    # scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-6)
 
     cka_fn = LinearCKALoss()
 
@@ -231,24 +591,39 @@ def train_distill():
     # mapping = {s_i: int(s_i * (32-1) / (28-1)) for s_i in range(28)}
     n_student_layers = student.config.n_layer
     n_teacher_layers = teacher.config.n_layer
+    
+    start=int(n_student_layers*0.25)
+    end=int(n_student_layers*0.85)
+
     print(f"Mapping {n_student_layers} Student layers -> {n_teacher_layers} Teacher layers")
     mapping = {
-        s_i: int(s_i * (n_teacher_layers - 1) / (n_student_layers - 1)) 
-        for s_i in range(n_student_layers)
+        s_i: int(s_i * (n_teacher_layers - 1) / (n_student_layers - 1))
+        for s_i in range(start, end, 2)
     }
 
 
-    n_experts = student.config.n_expert    
+    n_experts = student.config.n_expert   
+    logger=LossLogger(OUTPUT_ROOT) 
     print(f"Training Started. Steps per Epoch: {len(data_loader)}")
-    optimizer.zero_grad() 
+    # optimizer.zero_grad() 
+
+    # torch.backends.cuda.matmul.allow_tf32 = True
     
-    global_step = 0
+    update_step = 0
+    step = 0
     for epoch in range(NUM_EPOCHS):
         print(f"\n=== EPOCH {epoch+1}/{NUM_EPOCHS} ")
 
-        for batch_idx, (input_ids, loss_mask) in enumerate(tqdm(data_loader, desc="Training")):
-            input_ids = input_ids.to(device).long()
+        # for batch_idx, (input_ids, loss_mask) in enumerate(tqdm(data_loader, desc="Training")):
+        for batch in tqdm(data_loader):
+            input_ids, loss_mask = batch
+            input_ids = input_ids.to(device)
             loss_mask = loss_mask.to(device)
+
+            if step < WARMUP_STEPS:
+                lr_scale = (step + 1) / WARMUP_STEPS
+                for g in optimizer.param_groups:
+                    g["lr"] = 5e-5 * lr_scale
 
             # Teacher Forward (No Grads)
             with torch.no_grad():
@@ -257,126 +632,142 @@ def train_distill():
             # Student Forward
             s_logits, s_features = student(input_ids, return_features=True)
 
-            # LOSS A: Soft Logit Distillation (With Masking)
-            # We calculate KL Divergence only on the unmasked tokens (Thoughts + Advisory)
             T = DISTILL_CONFIG["T"] # Distillation Temperature
 
-            # Shapes: [B, T, Vocab]
-            student_log_probs = F.log_softmax(s_logits / T, dim=-1)
-            teacher_probs = F.softmax(t_logits / T, dim=-1)
-            # Standard KLDiv reduces to a scalar, so we need to implement manual reduction for masking
-            # kl_loss_pointwise shape: [B, T, Vocab] -> Sum over vocab -> [B, T]
-            kl_loss_pointwise = F.kl_div(student_log_probs, teacher_probs, reduction="none", log_target=False).sum(dim=-1) 
-            # Apply Mask
-            # loss_mask is [B, T], 1 for learnable tokens, 0 for prompt
-            active_loss = (kl_loss_pointwise * loss_mask).sum() / (loss_mask.sum() + 1e-6)
-            loss_kl = active_loss * (T**2)
+            # KL
+            student_log=F.log_softmax(s_logits/T,dim=-1)
+            teacher_prob=F.softmax(t_logits/T,dim=-1)
+
+            kl_pointwise = F.kl_div(student_log, teacher_prob, reduction="none").sum(-1)
+
+            kl = (kl_pointwise * loss_mask).sum() / (loss_mask.sum() + 1e-6)
+            kl = kl * (T**2)
+
+            # CE
+            shift_logits=s_logits[:,:-1]
+            shift_labels=input_ids[:,1:]
+
+            ce_pointwise = F.cross_entropy(
+                shift_logits.reshape(-1,shift_logits.size(-1)),
+                shift_labels.reshape(-1),
+                reduction="none"
+            ).view(shift_labels.shape)
+
+            shift_mask = loss_mask[:,1:]
+
+            ce = (ce_pointwise * shift_mask).sum() / (shift_mask.sum() + 1e-6)
 
 
-            #LOSS B: Cross-Entropy 
-            # Shift targets: logits[0] predicts input_ids[1]
-            shift_logits = s_logits[..., :-1, :].contiguous()
-            shift_labels = input_ids[..., 1:].contiguous()
-            shift_mask = loss_mask[..., 1:].contiguous()
+            # CKA
 
-            # Calculate standard CE
-            ce_loss_pointwise = F.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1), reduction="none").view(shift_labels.size())
-            # Apply mask
-            loss_ce = (ce_loss_pointwise * shift_mask).sum() / (shift_mask.sum() + 1e-6)
+            cka=0
 
+            for s,t in mapping.items():
 
-            # LOSS C: Feature CKA Distillation 
-            loss_cka = sum(cka_fn(s_features[s], t_features[t]) for s, t in mapping.items()) / len(mapping)
+                sf, tf = paired_token_sample(
+                    s_features[s].detach(),
+                    t_features[t].detach()
+                )
 
-            # LOSS D: Expert Diversity (The Research Key) 
-            loss_diversity = 0
-            moe_layers = [h.mlp for h in student.transformer.h if hasattr(h.mlp, 'experts')]
-            moe_blocks = [(idx, h) for idx, h in enumerate(student.transformer.h) if hasattr(h.mlp, 'experts')]
+                cka+=cka_fn(sf,tf)
 
-            for i, (layer_idx, block) in enumerate(moe_blocks):
-                if layer_idx == 0: continue 
-                # We need the input to the MLP for this layer. 
-                # Since s_features contains block outputs, let's use the 
-                # features from the PREVIOUS layer as the input to this MLP.
-                
-                # s_features[i-1] is the input to layer i
-                # We only need a small slice of tokens to save VRAM during diversity check
-                latent_input = s_features[layer_idx - 1].detach()[:, :128, :]
+            cka = cka / max(len(mapping),1)
 
-                expert_outputs = [block.mlp.experts[exp_idx](latent_input) for exp_idx in range(n_experts)]
-
-                layer_div = 0
-                for i_exp in range(n_experts):
-                    for j_exp in range(i_exp + 1, n_experts):
-                        # Functional Diversity: Experts must produce different outputs
-                        layer_div += (1 - cka_fn(expert_outputs[i_exp], expert_outputs[j_exp]))
-                
-                loss_diversity += (layer_div / (n_experts * (n_experts - 1) / 2))
-                
-                del expert_outputs #to del the tensors accumulated after slicing
-
-            loss_diversity /= len(moe_layers)
+            router_loss = compute_load_balance_loss(student,n_experts)
+            div_loss = expert_diversity_cka(student)
+            
+            student_prob = torch.exp(student_log)
+            entropy = -(student_prob * student_log).sum(-1).mean()
 
 
-            # Total Loss 
-            total_loss = (DISTILL_CONFIG["alpha"] * loss_kl) + \
-                        (DISTILL_CONFIG["lambda"] * loss_ce) + \
-                        (DISTILL_CONFIG["beta"] * loss_cka) + \
-                        (DISTILL_CONFIG["gamma"] * loss_diversity)        
+            loss=(
+                DISTILL_CONFIG["alpha"]*kl
+                +DISTILL_CONFIG["lambda"]*ce
+                +DISTILL_CONFIG["beta"]*cka
+                +DISTILL_CONFIG["delta"]*div_loss
+                +DISTILL_CONFIG["gamma"]*router_loss
+            )
+            loss -= 0.01 * entropy
 
+            #training step
+            (loss / ACCUMULATE_GRAD_STEPS).backward()
 
-            loss_scaled = total_loss / ACCUMULATE_GRAD_STEPS
-            loss_scaled.backward()
-
-            # Step Optimizer ONLY every 'N' steps
-
-            is_accumulation_step = (batch_idx + 1) % ACCUMULATE_GRAD_STEPS == 0
-            is_last_batch = (batch_idx + 1) == len(data_loader)
-            # if (batch_idx + 1) % ACCUMULATE_GRAD_STEPS == 0:
-            if is_accumulation_step or is_last_batch:
-                # Gradient Clipping for MoE Stability
-                torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
+            if (step + 1) % ACCUMULATE_GRAD_STEPS == 0:
+                torch.nn.utils.clip_grad_norm_(student.parameters(),1.0)
                 optimizer.step()
-                scheduler.step() # Update LR
+                scheduler.step()
                 optimizer.zero_grad()
+                update_step+=1
 
-                global_step += 1
+            step+=1
 
-                #logging
-                all_indices = torch.cat([layer.mlp.last_indices for layer in student.transformer.h if hasattr(layer.mlp, 'last_indices')], dim=0)
-                max_load = (torch.bincount(all_indices.view(-1), minlength=n_experts).float() / all_indices.numel()).max().item()
+            max_load = 0.0
+            all_indices = []
 
-                logger.log(global_step, total_loss.item(), loss_kl.item(), loss_ce.item(), loss_cka.item(), loss_diversity.item(), max_load)
+            for layer in student.transformer.h:
+                if hasattr(layer.mlp, "last_indices") and layer.mlp.last_indices is not None:
+                    all_indices.append(layer.mlp.last_indices)
 
-                # Print status
-                if global_step % 20 == 0:
-                    current_lr = scheduler.get_last_lr()[0]
-                    print(f"Step {global_step} | Total_Loss: {total_loss:.4f} | Load: {max_load:.2%} | LR: {current_lr:.2e} ")
+            if len(all_indices) > 0:
+                all_indices = torch.cat(all_indices, dim=0).detach()
+                max_load = (
+                    torch.bincount(all_indices.view(-1), minlength=n_experts).float()
+                    / all_indices.numel()
+                ).max().item()
 
-                #  THE AUDIT (Every 500 Steps) 
-                if global_step % 200 == 0:
-                    audit_expert_specialization(student, cka_fn, [input_ids], global_step)
-                    # torch.save(student.state_dict(), CHECKPOINT_ROOT / f"step-{global_step}.pth")
-                    checkpoint = {
-                        'step': global_step,
-                        'model_state_dict': student.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'scheduler_state_dict': scheduler.state_dict(),
-                    }
-                    torch.save(checkpoint, CHECKPOINT_ROOT / f"step-{global_step}.pth")
+            logger.log(
+                step,
+                loss.item(),
+                kl.item(),
+                ce.item(),
+                cka.item(),
+                div_loss.item(),
+                router_loss.item(),
+                max_load
+            )
 
+            # Print status
+            if step % 20 == 0:
+                current_lr = scheduler.get_last_lr()[0]
+                print(
+                    f"Step {step} | "
+                    f"Loss: {loss.item():.4f} | "
+                    f"KL: {kl.item():.4f} | "
+                    f"CE: {ce.item():.4f} | "
+                    f"CKA: {cka.item():.4f} | "
+                    f"DIV: {div_loss.item():.6f} | "
+                    f"Router: {router_loss.item():.4f} | "
+                    f"MaxLoad: {max_load:.2%} | "
+                    f"LR: {current_lr:.2e}"
+                )
+
+            #  THE AUDIT 
+            if (step + 1) % ACCUMULATE_GRAD_STEPS == 0 and (update_step+1)%600 == 0:
+                audit_teacher_expert_alignment(
+                    student,teacher,cka_fn,batch,step
+                )
+                audit_expert_specialization(student, cka_fn, [input_ids], step)
+                # torch.save(student.state_dict(), CHECKPOINT_ROOT / f"step-{global_step}.pth")
+                checkpoint = {
+                    'step': step,
+                    'model_state_dict': student.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                }
+                torch.save(checkpoint, CHECKPOINT_ROOT / f"step-{step}.pth", _use_new_zipfile_serialization=False)
+                
 
     # Save the final student state separately
     final_path = CHECKPOINT_ROOT / "lit_model.pth"
     # torch.save(student.state_dict(), final_path)
     checkpoint = {
-        'step': global_step,
+        'step': step,
         'model_state_dict': student.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
     }
-    torch.save(checkpoint, CHECKPOINT_ROOT / "lit_model.pth")
-    audit_expert_specialization(student, cka_fn, [input_ids], global_step)
+    torch.save(checkpoint, CHECKPOINT_ROOT / "lit_model.pth", _use_new_zipfile_serialization=False)
+    audit_expert_specialization(student, cka_fn, [input_ids], step)
 
 
     # Copy configuration files to make the model portable
@@ -404,6 +795,7 @@ def train_distill():
 
 if __name__ == "__main__":
     train_distill()
+
 
 
 

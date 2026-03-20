@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=finetune
-#SBATCH --partition=rl
+#SBATCH --job-name=qwen
+#SBATCH --partition=translation
 #SBATCH --gres=gpu:1
-#SBATCH --time=42:00:00
+#SBATCH --time=45:00:00
 #SBATCH --output=logs/train_%j.out
 #SBATCH --error=logs/train_%j.err
 #SBATCH --nodes=1
@@ -20,7 +20,7 @@ conda activate proj_agri_iitr
 echo "Using Python: $(which python)"
 
 # 2. Navigate to Project Root
-cd ~/projects/Distilled_qwen3_moe_crop_advisory_hi/
+cd ~/Geometry_Distilled_qwen3_moe_crop_advisory_hi/
 
 # 3. Optimizations
 export PYTHONPATH=$(pwd)

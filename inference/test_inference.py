@@ -6,7 +6,7 @@ from litgpt.config import Config
 from litgpt.tokenizer import Tokenizer
 
 # --- CONFIGURATION ---
-CHECKPOINT_PATH = "checkpoints/Qwen/Qwen3-0.6B-Agri-Distilled/02_03_run_test_80k_E9E703/step-3600.pth" 
+CHECKPOINT_PATH = "checkpoints/Qwen/Qwen3-0.6B-Agri-Distilled/12_03_run_test_80k_5C0943/step-3200.pth" 
 TOKENIZER_DIR = "checkpoints/Qwen/Qwen3-0.6B-moe-init" 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

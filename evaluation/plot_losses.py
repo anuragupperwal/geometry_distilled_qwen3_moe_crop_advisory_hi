@@ -21,8 +21,8 @@ def plot_training_results(csv_path="outputs/training_log.csv"):
     ax2.legend(loc='upper right')
 
     plt.title('Distillation Progress: Reasoning Alignment & Expert Balancing')
-    plt.savefig("outputs/distillation_curves.png")
-    print("Graph saved to outputs/distillation_curves.png")
+    plt.savefig("outputs/12_03_run_test_80k_5C0943/distillation_curves.png")
+    print("Graph saved to outputs/12_03_run_test_80k_5C0943/distillation_curves.png")
 
 if __name__ == "__main__":
     plot_training_results()

@@ -98,7 +98,7 @@ class Config:
     n_expert_per_token: int = 0
     first_k_dense_replace: Optional[int] = None
     routed_scaling_factor: float = 1.0
-    norm_topk_prob: bool = False
+    norm_topk_prob: bool = True
     # GPT before/after blocks
     scale_embeddings: bool = False
     lm_head_bias: bool = False
@@ -328,7 +328,7 @@ qwen_3_configs = [
         norm_class_name="RMSNorm",
         mlp_class_name="LLaMAMLP",
         intermediate_size=3072,
-        moe_intermediate_size=3072,
+        moe_intermediate_size=3072, #4096
         norm_eps=1e-6,
         rope_base=1000000,
         head_size=128,

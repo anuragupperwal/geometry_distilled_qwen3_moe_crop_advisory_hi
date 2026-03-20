@@ -285,6 +285,9 @@ python -m inference.test_inference
 * 
 python plot_results.py
 
+* check folder storage
+du -sh checkpoints/Qwen/Qwen3-0.6B-Agri-Distilled/*
+
 ---
 
 
@@ -337,6 +340,16 @@ du -sh *
     Reference Paper: Zheng et al. (2023), "Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena" (Published by LMSYS / UC Berkeley).
         LLM-as-a-Judge: Tests human vibes (Tone, Safety, Logic).
 
+
+
+    three advanced extensions of this paper that researchers now use:
+        1️⃣ Kernel CKA vs Linear CKA differences
+        2️⃣ CKA for Transformers and attention heads
+        3️⃣ How OpenAI / DeepMind analyze LLM layers using CKA
+
+
+    Minibatch CKA
+    https://arxiv.org/html/2405.08657v1
 
 
 ### Tip for your Defense

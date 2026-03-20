@@ -164,3 +164,54 @@ def break_expert_symmetry(model, noise_std=1e-4):
                 noise = torch.randn_like(param) * noise_std
                 param.add_(noise)
 
+
+
+
+
+--------
+
+
+
+* problem is called: Representational Similarity - CKA solves
+
+* CKA - 
+    Invariant to Linear transformations
+
+
+* Cosine similarity ignores:
+	•	magnitude
+	•	distribution structure
+    measures:
+	•	angle between vectors
+    
+    It compares individual embeddings.
+
+    CKA compares:
+        similarity matrices of representations - whether pairwise relationships between samples match, 
+        Not individual vectors
+
+    Cosine similarity:
+        local similarity
+
+    CKA: 
+        global representation geometry
+
+    Cosine similarity:
+        Teacher and student may have:
+            •	different dimension
+            •	rotated space
+            •	permuted neurons.
+
+        Then cosine becomes meaningless.
+
+    CKA:
+        Invariant to:
+        •	neuron permutation
+        •	orthogonal rotation
+        •	feature reparameterization.
+
+* Intuition :
+    Hidden states answer: Are neuron activations identical?
+    Geometry answers: Do tokens occupy the same structure in embedding space?
+---------
+

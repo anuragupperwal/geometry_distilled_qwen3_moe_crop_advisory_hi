@@ -1,0 +1,13 @@
+{
+    "run_name": "16_03_run_test_80k_D851BF",
+    "timestamp": "2026-03-16 22:42:50",
+    "alpha": 0.5,
+    "lambda": 0.5,
+    "beta": 0.4,
+    "gamma": 0.05,
+    "T": 1.2,
+    "max_seq_length": 4096,
+    "batch_size": 2,
+    "accum_steps": 8,
+    "dataset": "data/train_bilingual_mixed_83k_agri65k.parquet"
+}

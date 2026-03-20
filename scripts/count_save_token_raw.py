@@ -3,11 +3,11 @@ from litgpt.tokenizer import Tokenizer
 from tqdm import tqdm
 
 
-INPUT_PATH = "data/train_final_merged_220221.parquet"
+INPUT_PATH = "data/raw_train_final_merged_220221.parquet"
 OUTPUT_PATH = "data/train_agri_filtered_141k.parquet"
 TOKENIZER_DIR = "checkpoints/Qwen/Qwen3-0.6B"
 
-MAX_SEQ_LENGTH = 4000
+MAX_SEQ_LENGTH = 7000
 TARGET_ROW_COUNT = 141000  # Exactly how many rows to keep in the final file
 
 def build_full_prompt(row):
@@ -27,7 +27,7 @@ def build_full_prompt(row):
         f"<|end|>"
     )
 
-def count_and_extract_safe_rows(input_path, tokenizer_dir, max_len):
+def count_and_extract_safe_rows(input_path, tokenizer_dir, max_len, min_len):
     """
     Function 1: Scans the dataset, formats columns into a text string, 
     tokenizes it, and returns a DataFrame of ONLY the rows under the length limit.
@@ -48,7 +48,7 @@ def count_and_extract_safe_rows(input_path, tokenizer_dir, max_len):
         tokens = tokenizer.encode(full_text, bos=False, eos=False)
         
         # 3. Keep the original row if it fits
-        if len(tokens) <= max_len:
+        if len(tokens) >= min_len and len(tokens)<max_len:
             safe_rows.append(row)
             
     df_safe = pd.DataFrame(safe_rows)
@@ -83,12 +83,12 @@ def save_target_amount(df_safe, target_count, output_path):
 
 def main():
     # 1. Extract all rows that are under 4000 tokens
-    df_safe = count_and_extract_safe_rows(INPUT_PATH, TOKENIZER_DIR, MAX_SEQ_LENGTH)
+    df_safe = count_and_extract_safe_rows(INPUT_PATH, TOKENIZER_DIR, MAX_SEQ_LENGTH, 4000)
     
     # 2. Save exactly 12,000 of them (or whatever TARGET_ROW_COUNT is set to)
-    save_target_amount(df_safe, TARGET_ROW_COUNT, OUTPUT_PATH)
-    OUTPUT_PATH_65k= "data/train_agri_data_65k.parquet"
-    save_target_amount(df_safe, 65000, OUTPUT_PATH_65k)
+    # save_target_amount(df_safe, TARGET_ROW_COUNT, OUTPUT_PATH)
+    OUTPUT_PATH_65k= "data/test/extracted_100_rows.parquet"
+    save_target_amount(df_safe, 100, OUTPUT_PATH_65k)
 
 if __name__ == "__main__":
     main()

@@ -32,3 +32,4 @@ sacrebleu
 sentence-transformers
 google-generativeai
 dotenv
+umap-learn

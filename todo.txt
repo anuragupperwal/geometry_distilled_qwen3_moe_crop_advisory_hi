@@ -1,0 +1,85 @@
+* check upcycled model - check experts and weights.
+* models are downloading and being upcycles. confirm that the upcycle logic is correct.
+* test out the upcycled model by inferencing for metrics
+
+* The absolute latest SOTA models (like DeepSeek-MoE and Qwen-MoE) use a more advanced architecture called "Shared + Routed Experts".
+
+        They realized that Sparse Upcycling has one flaw: Redundancy. If every expert needs to know basic English grammar (e.g., "The cat is..."), they all waste parameters learning the same basic rules.
+
+        The SOTA Solution (DeepSeek/Qwen Style): They split the experts into two types:
+
+        Shared Expert (Always Active): This single expert processes every token. It handles the "common knowledge" (grammar, basic facts) that everyone needs.
+
+        Routed Experts (Selectively Active): These are the specialized experts (Agriculture, Coding, Math) that are only activated by the router when needed.
+
+
+
+* If you want to make your project scientifically rigorous, you should perform an Ablation Study. This means running 3 or 4 very short runs (e.g., 500 steps) to prove why your combination is necessary:
+        Run 1 (Baseline): CE + Diversity only (No Teacher at all).
+
+        Run 2 (Standard Distillation): CE + KL + Diversity (No CKA).
+
+        Run 3 (Your Full Setup): CE + KL + CKA + Diversity.
+
+* Add load balancing:
+        Load Balancing Loss (Router Z-Loss): Instead of penalizing the outputs of the experts (like you do), they penalize the router. If the router starts sending 80% of the tokens to Expert 0 (which causes the other experts to die/collapse), the Load Balancing Loss spikes. This mathematically forces the router to distribute tokens evenly.
+
+* What you would measure and show:
+        Loss Curves: Show if Strategy B reaches a lower final Cross-Entropy loss because the gradients weren't fighting the CKA loss at the end.
+
+        Expert Specialization (Heatmaps): Generate the CKA heatmaps for Strategy A vs. Strategy B. Does the Two-Stage method create cleaner, more distinct experts? (Usually, it does).
+
+        Inference Quality: Take 10 test prompts (like the Downy Mildew one). Does Strategy B have better Hindi grammar? (Because the final steps focused purely on language modeling, not feature matching, the grammar usually improves drastically).
+
+Q: My model is looping while generating the assistant response. like it finishes and then again starts to 
+generate and only stops once the max token is hit. And I am just cleaning while paring the results. 
+Does this happens when generating in-general with these models? 
+How to ensure that the model knows when to stop?
+
+
+
+
+NEW
+* add load balancing
+* 
+*One Interesting Research Direction for Your Setup Because MoE has experts, you could also compute: CKA(teacher layer, expert output) to see: which expert learns which function This could produce a very interesting analysis section for a paper.
+
+
+
+
+
+
+
+* Typical reviewer questions:
+
+    1️⃣ Did experts collapse?
+    2️⃣ Did routing become balanced?
+    3️⃣ Did the student learn teacher reasoning?
+    4️⃣ Does MoE actually improve outputs?
+
+* Evaluation section could look like:
+    4. Evaluation
+        4.1 Advisory Generation Quality
+        - BLEU
+        - ROUGE-L
+        - BERTScore
+        - Token F1
+
+        4.2 Reasoning Transfer
+        - Thought BERTScore
+        - Thought length similarity
+
+        4.3 Expert Specialization
+        - Routing entropy
+        - Expert similarity matrix
+
+        4.4 Qualitative Analysis
+        - Example advisories
+
+
+
+* You can write:
+
+    Geometry-based distillation improves task-specific reasoning alignment but introduces instability in low-capacity MoE generators.
+
+    This is interesting research.

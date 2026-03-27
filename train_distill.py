@@ -37,12 +37,12 @@ torch.backends.cuda.enable_math_sdp(True)
 RUN_TAG = "23_03_run_test_80k"  # <--- EDIT THIS PER RUN
 
 DISTILL_CONFIG = {
-    "alpha": 0.55,   # KL
-    "lambda": 0.55,  # CE
+    "alpha": 0.4,   # KL
+    "lambda": 0.7,  # CE
     "beta": 0.15,    # CKA
     "gamma": 0.15,   # load balance
     "delta": 0.08, #div 
-    "T": 2,
+    "T": 3,
 }
 
 
@@ -211,7 +211,7 @@ def compute_load_balance_loss(student,n_experts):
 # ------------------------------------------------------------
 
 @torch.no_grad()
-def audit_teacher_expert_alignment(student,teacher,cka_fn,batch,step):
+def audit_teacher_expert_alignment(student,teacher,cka_fn,batch,step, epoch):
     '''
     How similar each expert’s representation is to the teacher layer representation.
     0 → completely different
@@ -255,13 +255,13 @@ def audit_teacher_expert_alignment(student,teacher,cka_fn,batch,step):
         matrix[i]=sim
 
     save_dir = OUTPUT_ROOT / "audits"
-    save_path=save_dir/f"teacher_expert_alignment_{step}.pt"
+    save_path=save_dir/f"teacher_expert_alignment_epoch_{epoch}_step_{step}.pt"
     torch.save(matrix,save_path)
     
     plot_cka_heatmap(
         save_path,
         save_path.with_suffix(".png"),
-        title=f"Teacher-Expert Alignment Step {step}"
+        title=f"Teacher-Expert Alignment Epoch {epoch} Step {step}"
     )
 
 
@@ -270,7 +270,7 @@ def audit_teacher_expert_alignment(student,teacher,cka_fn,batch,step):
 
 
 @torch.no_grad()
-def audit_expert_specialization(student, cka_fn, batch, step):
+def audit_expert_specialization(student, cka_fn, batch, step, epoch):
     """
     Live Training Audit: Uses a forward hook to capture real contextual 
     hidden states from the current batch and calculates expert similarity.
@@ -285,7 +285,7 @@ def audit_expert_specialization(student, cka_fn, batch, step):
         input_ids = input_ids[:, :512]
     
     save_dir = OUTPUT_ROOT / "audits"
-    matrix_path = save_dir / f"cka_matrix_step_{step}.pth"
+    matrix_path = save_dir / f"cka_matrix_epoch_{epoch}_step_{step}.pth"
     
     # 2. Setup the Hook to capture Layer 14 (Middle) input
     target_layer_idx = student.config.n_layer // 2
@@ -308,7 +308,7 @@ def audit_expert_specialization(student, cka_fn, batch, step):
     layer = target_block.mlp
     
     if hasattr(layer, 'experts'):
-        print(f"\nStep {step}: Expert Specialization Audit (Real-Data Hook)")
+        print(f"\nEpoch {epoch} Step {step}: Expert Specialization Audit (Real-Data Hook)")
         
         # 4. Pass captured real states through each expert
         expert_outputs = []
@@ -339,8 +339,8 @@ def audit_expert_specialization(student, cka_fn, batch, step):
 
         plot_cka_heatmap(
             matrix_path,
-            save_path=save_dir / f"heatmap_step_{step}.png",
-            title=f"Expert CKA Similarity (Step {step})"
+            save_path=save_dir / f"heatmap_epoch_{epoch}_step_{step}.png",
+            title=f"Expert CKA Similarity (Epoch {epoch}, Step {step})"
         )        
         avg_sim = cka_matrix.mean().item()
         print(f"Layer {target_layer_idx} Avg Expert Similarity: {avg_sim:.4f}")
@@ -349,7 +349,7 @@ def audit_expert_specialization(student, cka_fn, batch, step):
 
 
 @torch.no_grad()
-def audit_expert_specialization_routerwise(student, cka_fn, batch, step):
+def audit_expert_specialization_routerwise(student, cka_fn, batch, step, epoch):
     """
     Correct MoE Audit:
     - Uses REAL routed tokens
@@ -373,7 +373,7 @@ def audit_expert_specialization_routerwise(student, cka_fn, batch, step):
         input_ids = input_ids[:, :512]
 
     save_dir = OUTPUT_ROOT / "audits"
-    matrix_path = save_dir / f"cka_matrix_step_{step}.pth"
+    matrix_path = save_dir / f"cka_matrix_epoch_{epoch}_step_{step}.pth"
 
     # --------------------------------------------------
     # 2. Forward pass (to populate router states)
@@ -398,7 +398,7 @@ def audit_expert_specialization_routerwise(student, cka_fn, batch, step):
         student.train()
         return
 
-    print(f"\nStep {step}: Expert Specialization Audit (ROUTING-AWARE)")
+    print(f"\nEpoch {epoch} Step {step}: Expert Specialization Audit (ROUTING-AWARE)")
 
     # --------------------------------------------------
     # 4. Get routing + hidden states
@@ -475,8 +475,8 @@ def audit_expert_specialization_routerwise(student, cka_fn, batch, step):
     # --------------------------------------------------
     plot_cka_heatmap(
         matrix_path,
-        save_path=save_dir / f"heatmap_routing_aware_step_{step}.png",
-        title=f"Expert CKA Similarity (Routing-Aware) Step {step}"
+        save_path=save_dir / f"heatmap_routing_aware_epoch_{epoch}_step_{step}.png",
+        title=f"Expert CKA Similarity (Routing-Aware) Epoch {epoch} Step {step}"
     )
 
     # --------------------------------------------------
@@ -725,6 +725,37 @@ def train_distill():
     update_step = 0
     step = 0
     last_cka = torch.tensor(0.0, device=device)
+    
+
+    print("\nDataset sanity check:\n")
+
+    # data sanity check
+    for i in range(3):
+
+        tokens, mask = dataset[i]
+
+        print("\n============================")
+        print("Sample", i)
+        print("============================")
+
+        decoded = tokenizer.decode(tokens.tolist())
+        word = tokenizer.decode(tokens.unsqueeze(0))
+
+        print(decoded[:1000])
+
+        print("\nMASK CHECK")
+
+        for t, m in zip(tokens[:120], mask[:120]):
+
+            word = tokenizer.decode([t.item()])
+
+            if m == 1:
+                print(f"{word} → LOSS")
+            else:
+                print(f"{word} → MASK")
+
+
+
 
     for epoch in range(NUM_EPOCHS):
         print(f"\n=== EPOCH {epoch+1}/{NUM_EPOCHS} ")
@@ -807,7 +838,7 @@ def train_distill():
                 +DISTILL_CONFIG["delta"]*div_loss
                 +DISTILL_CONFIG["gamma"]*router_loss
             )
-            loss -= 0.002 * entropy
+            loss -= 0.01 * entropy
 
             #training step
             (loss / ACCUMULATE_GRAD_STEPS).backward()
@@ -864,16 +895,15 @@ def train_distill():
             #  THE AUDIT 
             if (step + 1) % ACCUMULATE_GRAD_STEPS == 0 and (update_step+1)%1500 == 0:
                 audit_teacher_expert_alignment(
-                    student,teacher,cka_fn,batch,step
+                    student,teacher,cka_fn,batch,step, epoch
                 )
-                audit_expert_specialization(student, cka_fn, [input_ids], step)
-                audit_expert_specialization_routerwise(student, cka_fn, [input_ids], step)
-                # torch.save(student.state_dict(), CHECKPOINT_ROOT / f"step-{global_step}.pth")
+                audit_expert_specialization(student, cka_fn, [input_ids], step, epoch)
+                audit_expert_specialization_routerwise(student, cka_fn, [input_ids], step, epoch)
                 checkpoint = {
                     'step': step,
                     'model_state_dict': student.state_dict(),
                 }
-                torch.save(checkpoint, CHECKPOINT_ROOT / f"step-{step}.pth", _use_new_zipfile_serialization=False)
+                torch.save(checkpoint, CHECKPOINT_ROOT / f"epoch-{epoch}_step-{step}.pth", _use_new_zipfile_serialization=False)
 
         checkpoint = {
             'step': step,
@@ -917,7 +947,7 @@ def train_distill():
     with open(OUTPUT_ROOT / "run_summary.json", "w") as f:
         json.dump(summary, f, indent=4)
         
-    print(f"✅ Finished! Total Duration: {duration}")
+    print(f"Finished! Total Duration: {duration}")
 
 
 

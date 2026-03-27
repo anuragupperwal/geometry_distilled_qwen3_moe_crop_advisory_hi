@@ -51,7 +51,7 @@ class AgriDataset(Dataset):
         assistant_tag = "<|im_start|>assistant"
 
         if assistant_tag in text:
-            split_idx = text.find(assistant_tag)
+            split_idx = text.find(assistant_tag) + len(assistant_tag)
         else:
             split_idx = 0
 
@@ -87,7 +87,8 @@ class AgriDataset(Dataset):
         # Convert to tensor
         # --------------------------------
 
-        full_ids.clone().detach()
+        if not isinstance(full_ids, torch.Tensor):
+            full_ids = torch.tensor(full_ids, dtype=torch.long)
 
         # --------------------------------
         # Padding

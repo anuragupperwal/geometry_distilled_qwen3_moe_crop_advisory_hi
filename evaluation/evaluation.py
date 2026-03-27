@@ -12,12 +12,12 @@ from litgpt.model import GPT
 from litgpt.config import Config
 from litgpt.tokenizer import Tokenizer
 
-import google.generativeai as genai
+# import google.generativeai as genai
 # from bleurt import score as bleurt_score
-from moverscore import word_mover_score
+# from moverscore import word_mover_score
 from comet import download_model, load_from_checkpoint
 
-
+torch.set_float32_matmul_precision("high")
 
 comet_path = download_model("Unbabel/wmt22-comet-da")
 comet_model = load_from_checkpoint(comet_path)
@@ -25,9 +25,9 @@ comet_model = load_from_checkpoint(comet_path)
 # BLEURT_MODEL = "bleurt/BLEURT-20"
 # bleurt_scorer = bleurt_score.BleurtScorer(BLEURT_MODEL)
 
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+# genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-judge_model = genai.GenerativeModel("gemini-2.5-flash")
+# judge_model = genai.GenerativeModel("gemini-2.5-flash")
 
 # =========================================================
 # CONFIGURATION
@@ -38,23 +38,23 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 TEST_DATA = "data/test/extracted_100_rows.parquet"
 TOKENIZER_DIR = "checkpoints/Qwen/Qwen3-0.6B"
 
-MAX_NEW_TOKENS = 3072
+MAX_NEW_TOKENS = 1024
 
-OUTPUT_DIR = "results/evaluation_outputs/20_03_run_test_80k_1FC9E6"
+OUTPUT_DIR = "results/evaluation_outputs/16_03_run_test_80k_5DEB07_better_results"
 
 MODELS = {
-    # "Teacher": (
-    #     "checkpoints/Qwen/Qwen3-8B/lit_model.pth",
-    #     "Qwen3-8B"
-    # ),
-    # "Base": (
-    #     "checkpoints/Qwen/Qwen3-0.6B/lit_model.pth",
-    #     "Qwen3-0.6B"
-    # ),
+    "Teacher": (
+        "checkpoints/Qwen/Qwen3-8B/lit_model.pth",
+        "Qwen3-8B"
+    ),
+    "Base": (
+        "checkpoints/Qwen/Qwen3-0.6B/lit_model.pth",
+        "Qwen3-0.6B"
+    ),
     "Distilled": (
-        "checkpoints/Qwen/Qwen3-0.6B-Agri-Distilled/20_03_run_test_80k_1FC9E6/lit_model.pth",
+        "checkpoints/Qwen/Qwen3-0.6B-Agri-Distilled/16_03_run_test_80k_5DEB07_better_results/lit_model.pth",
         "Qwen3-0.6B-MoE"
-    )
+    ),
 }
 
 
@@ -88,64 +88,73 @@ def get_config(name):
 # Split reasoning and advisory
 # ---------------------------------------------------------
 
-def split_thought_advisory(text):
+# def split_thought_advisory(text):
 
-    text_lower = text.lower()
+#     text_lower = text.lower()
 
-    if "</think>" in text_lower:
-        split_idx = text_lower.find("</think>") + len("</think>")
+#     if "</think>" in text_lower:
+#         split_idx = text_lower.find("</think>") + len("</think>")
 
-        thought = text[:split_idx]
-        advisory = text[split_idx:]
+#         thought = text[:split_idx]
+#         advisory = text[split_idx:]
 
-        thought = thought.replace("<think>", "").replace("</think>", "")
-        advisory = advisory.replace("<advisory>", "").replace("</advisory>", "")
-        thought = re.sub(r"\s+", " ", thought).strip()
+#         thought = thought.replace("<think>", "").replace("</think>", "")
+#         advisory = advisory.replace("<advisory>", "").replace("</advisory>", "")
+#         thought = re.sub(r"\s+", " ", thought).strip()
 
-        advisory = re.sub(r"\s+", " ", advisory).strip()
+#         advisory = re.sub(r"\s+", " ", advisory).strip()
 
-        return thought, advisory
+#         return thought, advisory
 
-    return "", text.strip()
+#     return "", text.strip()
 
 
 ### improved splitting - test after above - as this covers all failure cases.
-# def split_thought_advisory(text):
+def split_thought_advisory(text):
+    text = text.strip()
 
-#     text = text.strip()
+    # Case-insensitive search
+    lower = text.lower()
 
-#     # Normalize casing
-#     lower = text.lower()
+    think_start = lower.find("<think>")
+    think_end = lower.find("</think>")
 
-#     think_start = lower.find("<think>")
-#     think_end = lower.find("</think>")
+    thought = ""
+    advisory = ""
 
-#     thought = ""
-#     advisory = ""
+    if think_start != -1 and think_end != -1 and think_end > think_start:
+        # Normal case
+        thought = text[think_start + len("<think>"):think_end]
+        advisory = text[think_end + len("</think>"):]
 
-#     if think_start != -1 and think_end != -1 and think_end > think_start:
+    elif think_end != -1:
+        # closing tag exists but opening missing
+        thought = text[:think_end]
+        advisory = text[think_end + len("</think>"):]
 
-#         thought = text[think_start + len("<think>"):think_end]
+    else:
+        # no think block
+        advisory = text
 
-#         advisory = text[think_end + len("</think>"):]
+    # -------------------------------------------------
+    # CLEAN TAGS (case insensitive)
+    # -------------------------------------------------
 
-#     elif think_end != -1:
-#         # thought exists but start tag missing
-#         thought = text[:think_end]
-#         advisory = text[think_end + len("</think>"):]
+    # remove think tags if still present
+    thought = re.sub(r"</?think>", "", thought, flags=re.IGNORECASE)
 
-#     else:
-#         # model failed to produce think block
-#         advisory = text
+    # remove advisory tags
+    advisory = re.sub(r"</?advisory>", "", advisory, flags=re.IGNORECASE)
 
-#     # Clean leftover tags
-#     advisory = advisory.replace("<advisory>", "").replace("</advisory>", "")
+    # remove any leftover XML-like tags
+    advisory = re.sub(r"<[^>]+>", "", advisory)
+    thought = re.sub(r"<[^>]+>", "", thought)
 
-#     # Normalize whitespace
-#     thought = re.sub(r"\s+", " ", thought).strip()
-#     advisory = re.sub(r"\s+", " ", advisory).strip()
+    # normalize whitespace
+    thought = re.sub(r"\s+", " ", thought).strip()
+    advisory = re.sub(r"\s+", " ", advisory).strip()
 
-#     return thought, advisory
+    return thought, advisory
 
 # ---------------------------------------------------------
 # Token F1
@@ -263,6 +272,8 @@ def generate(model, idx, max_new_tokens, eos_id, tokenizer):
     return torch.cat(generated, dim=1)
 
 
+
+
 # =========================================================
 # EVALUATION FUNCTIONS
 # =========================================================
@@ -290,7 +301,7 @@ def compute_advisory_metrics(preds, refs):
     f1_scores = [token_f1(p, r) for p, r in zip(preds, refs)]
 
     # bleurt_score = compute_bleurt(preds, refs)
-    mover_score = compute_moverscore(preds, refs)
+    # mover_score = compute_moverscore(preds, refs)
     comet_score = compute_comet(preds, refs)
     
 
@@ -299,8 +310,8 @@ def compute_advisory_metrics(preds, refs):
         "ROUGE-L": r["rougeL"],
         "BERTScore": bert_f1,
         "TokenF1": sum(f1_scores) / len(f1_scores),
-        "BLEURT_MODEL": bleurt_score,
-        "Mover Score": mover_score,
+        # "BLEURT_MODEL": bleurt_score,
+        # "Mover Score": mover_score,
         "Comet Score": comet_score,
     }
 
@@ -518,7 +529,7 @@ def run_evaluation():
     eos_id = tokenizer.eos_id
 
     df = pd.read_parquet(TEST_DATA)
-    df = df.head(1)
+    df = df.head(3)
 
     predictions_log = []
     metrics_log = []
@@ -594,20 +605,20 @@ def run_evaluation():
             advisory_len = len(advisory.split())
 
 
-            judge = llm_judge_score(
-                row["prompt"],
-                advisory,
-                reference
-            )
+            # judge = llm_judge_score(
+            #     row["prompt"],
+            #     advisory,
+            #     reference
+            # )
 
-            correctness = correctness_score(
-                row["prompt"],
-                advisory,
-                reference
-            )
+            # correctness = correctness_score(
+            #     row["prompt"],
+            #     advisory,
+            #     reference
+            # )
 
-            judge_scores.append(judge)
-            correctness_scores.append(correctness)
+            # judge_scores.append(judge)
+            # correctness_scores.append(correctness)
         
             predictions_log.append({
                 "id": row["custom_id"],
@@ -617,11 +628,12 @@ def run_evaluation():
                 "raw_output": output,
                 "thought_len": thought_len,
                 "advisory_len": advisory_len,
-                "judge_scores": judge_scores,
-                "correctness_scores": correctness_scores,
+                # "judge_scores": judge_scores,
+                # "correctness_scores": correctness_scores,
             })
 
             print(f"thought length: {thought_len}, advisory length: {advisory_len}")
+
         preds = [clean_text(p) for p in preds]
         refs = [clean_text(r) for r in refs]
 
@@ -637,8 +649,8 @@ def run_evaluation():
             **advisory_metrics,
             # **reasoning_metrics,
             "RouterEntropy": router_entropy,
-            "LLM_Judge": sum(judge_scores)/len(judge_scores),
-            "Correctness": sum(correctness_scores)/len(correctness_scores),
+            # "LLM_Judge": sum(judge_scores)/len(judge_scores),
+            # "Correctness": sum(correctness_scores)/len(correctness_scores),
         })
 
         del model
@@ -648,6 +660,8 @@ def run_evaluation():
     # =====================================================
     # SAVE OUTPUTS
     # =====================================================
+
+    os.makedirs(os.path.dirname(OUTPUT_DIR), exist_ok=True)
 
     pd.DataFrame(predictions_log).to_csv(
         os.path.join(OUTPUT_DIR, "predictions.csv"), index=False

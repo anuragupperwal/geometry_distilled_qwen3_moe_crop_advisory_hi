@@ -83,3 +83,8 @@ NEW
     Geometry-based distillation improves task-specific reasoning alignment but introduces instability in low-capacity MoE generators.
 
     This is interesting research.
+
+
+
+
+* Instead of pairwise CKA heatmaps, papers usually show:-  average inter-expert similarity over training

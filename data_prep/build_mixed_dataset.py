@@ -39,7 +39,9 @@ def format_chatml(system, user, thought, answer):
         f"<think>\n"
         f"{thought.strip()}\n"
         f"</think>\n\n"
+        f"<advisory>\n\n"
         f"{answer.strip()}\n"
+        f"</advisory>\n\n"
         f"<|im_end|>"
     )
 

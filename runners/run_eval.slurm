@@ -50,6 +50,8 @@ echo "================================"
 # 5. Run Evaluation
 # =========================================================
 
-python -u evaluation/evaluation.py
+python -m evaluation.s1_generate_predictions
+sleep 10
+python -m evaluation.s2_compute_metrics
 
 echo "Evaluation finished."

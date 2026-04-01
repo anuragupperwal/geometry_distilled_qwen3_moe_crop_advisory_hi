@@ -4,6 +4,7 @@ import pandas as pd
 import evaluate
 import seaborn as sns
 import matplotlib.pyplot as plt
+import numpy as np
 from pathlib import Path
 
 from comet import download_model, load_from_checkpoint
@@ -97,12 +98,17 @@ def compute_metrics():
         r = rouge.compute(predictions=preds, references=refs)
 
         # BERTScore
+        # BERTScore (Precision / Recall / F1)
         bert = bertscore.compute(
             predictions=preds,
             references=refs,
-            model_type="xlm-roberta-large"
+            model_type="xlm-roberta-large",
+            lang="hi",
+            rescale_with_baseline=True
         )
 
+        bert_precision = sum(bert["precision"]) / len(bert["precision"])
+        bert_recall = sum(bert["recall"]) / len(bert["recall"])
         bert_f1 = sum(bert["f1"]) / len(bert["f1"])
 
         # Token F1
@@ -126,9 +132,10 @@ def compute_metrics():
 
         results.append({
             "Model": model,
-            "BLEU": b["bleu"],
             "ROUGE-L": r["rougeL"],
-            "BERTScore": bert_f1,
+            "BERTScore_P": bert_precision,
+            "BERTScore_R": bert_recall,
+            "BERTScore_F1": bert_f1,
             "TokenF1": token_f1_avg,
             "COMET": comet_score,
             "RouterEntropy": router_entropy,
@@ -154,7 +161,9 @@ def compute_metrics():
     metric_columns = [
         "BLEU",
         "ROUGE-L",
-        "BERTScore",
+        "BERTScore_P",
+        "BERTScore_R",
+        "BERTScore_F1",
         "TokenF1",
         "COMET",
         "RouterEntropy"
@@ -178,6 +187,89 @@ def compute_metrics():
     )
 
     print(f"saved at {OUTPUT_DIR}")
+
+
+    corr_metrics = [
+        "BLEU",
+        "ROUGE-L",
+        "BERTScore_P",
+        "BERTScore_R",
+        "BERTScore_F1",
+        "TokenF1",
+        "COMET"
+    ]
+
+    corr = results_df[corr_metrics].corr()
+
+    plt.figure(figsize=(8,6))
+
+    sns.heatmap(
+        corr,
+        annot=True,
+        cmap="coolwarm",
+        fmt=".2f"
+    )
+
+    plt.title("Metric Correlation Heatmap")
+
+    plt.tight_layout()
+
+    plt.savefig(
+        OUTPUT_DIR / "metric_correlation_heatmap.png"
+    )
+
+
+    # ---------------------------------------------------------
+    # GENERATION METRICS RADAR CHART
+    # ---------------------------------------------------------
+
+    radar_metrics = [
+        "BLEU",
+        "ROUGE-L",
+        "BERTScore_F1",
+        "TokenF1",
+        "COMET"
+    ]
+
+    labels = radar_metrics
+    num_metrics = len(labels)
+
+    angles = np.linspace(0, 2*np.pi, num_metrics, endpoint=False)
+
+    fig = plt.figure(figsize=(7,7))
+    ax = plt.subplot(111, polar=True)
+
+    for i, row in results_df.iterrows():
+
+        values = row[radar_metrics].values.astype(float)
+
+        values = np.concatenate([values, [values[0]]])
+        angles_closed = np.concatenate([angles, [angles[0]]])
+
+        ax.plot(
+            angles_closed,
+            values,
+            linewidth=2,
+            label=row["Model"]
+        )
+
+        ax.fill(
+            angles_closed,
+            values,
+            alpha=0.1
+        )
+
+    ax.set_thetagrids(angles * 180/np.pi, labels)
+
+    plt.title("Model Performance Radar Chart")
+
+    plt.legend(loc="upper right")
+
+    plt.tight_layout()
+
+    plt.savefig(
+        OUTPUT_DIR / "generation_radar_plot.png"
+    )
 
 
 if __name__ == "__main__":

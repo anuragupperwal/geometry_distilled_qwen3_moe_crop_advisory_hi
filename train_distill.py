@@ -34,13 +34,13 @@ torch.backends.cuda.enable_math_sdp(True)
 
 #config
 
-RUN_TAG = "23_03_run_test_80k"  # <--- EDIT THIS PER RUN
+RUN_TAG = "01_04_run_test_80k"  # <--- EDIT THIS PER RUN
 
 DISTILL_CONFIG = {
-    "alpha": 0.4,   # KL
-    "lambda": 0.7,  # CE
-    "beta": 0.15,    # CKA
-    "gamma": 0.15,   # load balance
+    "alpha": 0.8,   # KL
+    "lambda": 0.5,  # CE
+    "beta": 0.1,    # CKA
+    "gamma": 0.1,   # load balance
     "delta": 0.08, #div 
     "T": 3,
 }
@@ -57,7 +57,7 @@ short_id = uuid.uuid4().hex[:6].upper()
 run_name = f"{RUN_TAG}_{short_id}"
 
 OUTPUT_ROOT = Path(f"outputs/{run_name}")
-CHECKPOINT_ROOT = Path(f"checkpoints/Qwen/Qwen3-0.6B-Agri-Distilled/{run_name}")
+CHECKPOINT_ROOT = Path(f"checkpoints/Qwen/Qwen3-1.7B-Agri-Distilled/{run_name}")
 
 # Create directories
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -66,7 +66,7 @@ CHECKPOINT_ROOT.mkdir(parents=True, exist_ok=True)
 
 DATA_PATH = "data/train_bilingual_mixed_83k_agri65k.parquet"
 TEACHER_CKPT = "checkpoints/Qwen/Qwen3-8B/lit_model.pth"
-STUDENT_INIT = "checkpoints/Qwen/Qwen3-0.6B-moe-init/lit_model.pth" 
+STUDENT_INIT = "checkpoints/Qwen/Qwen3-1.7B-moe-init/lit_model.pth" 
 
 print(f"Starting Run: {run_name}")
 print(f"Output Dir:   {OUTPUT_ROOT}")
@@ -631,7 +631,7 @@ def train_distill():
     start_time = datetime.now()
     device = torch.device("cuda") 
 
-    tokenizer = Tokenizer("checkpoints/Qwen/Qwen3-0.6B")
+    tokenizer = Tokenizer("checkpoints/Qwen/Qwen3-1.7B")
     dataset = AgriDataset(
             data_path=DATA_PATH, 
             tokenizer=tokenizer, 
@@ -653,7 +653,7 @@ def train_distill():
         param.requires_grad = False
 
     print("Loading 0.6B-MoE Student in BF16...")
-    student = GPT(Config.from_name("Qwen3-0.6B-MoE")).to(device, dtype=torch.bfloat16)
+    student = GPT(Config.from_name("Qwen3-1.7B-MoE")).to(device, dtype=torch.bfloat16)
     student.load_state_dict(torch.load(STUDENT_INIT, map_location=device, weights_only=True))
 
     for p in teacher.parameters():
@@ -674,7 +674,7 @@ def train_distill():
 
     optimizer=torch.optim.AdamW(
             student.parameters(),
-            lr=5e-5,
+            lr=3e-5,
             weight_decay=0.01
         )
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -702,7 +702,7 @@ def train_distill():
     n_student_layers = student.config.n_layer
     n_teacher_layers = teacher.config.n_layer
     
-    num_pairs = 8
+    num_pairs = 10
     student_layers = torch.linspace(
             0,
             n_student_layers - 1,
@@ -738,8 +738,7 @@ def train_distill():
         print("Sample", i)
         print("============================")
 
-        decoded = tokenizer.decode(tokens.tolist())
-        word = tokenizer.decode(tokens.unsqueeze(0))
+        decoded = tokenizer.processor.decode(tokens.tolist())
 
         print(decoded[:1000])
 
@@ -747,7 +746,8 @@ def train_distill():
 
         for t, m in zip(tokens[:120], mask[:120]):
 
-            word = tokenizer.decode([t.item()])
+            word = tokenizer.processor.decode([t.item()])
+
 
             if m == 1:
                 print(f"{word} → LOSS")
@@ -769,7 +769,7 @@ def train_distill():
             if step < WARMUP_STEPS:
                 lr_scale = (step + 1) / WARMUP_STEPS
                 for g in optimizer.param_groups:
-                    g["lr"] = 5e-5 * lr_scale
+                    g["lr"] = 3e-5 * lr_scale
 
             # Teacher 
             with torch.no_grad():
@@ -838,7 +838,6 @@ def train_distill():
                 +DISTILL_CONFIG["delta"]*div_loss
                 +DISTILL_CONFIG["gamma"]*router_loss
             )
-            loss -= 0.01 * entropy
 
             #training step
             (loss / ACCUMULATE_GRAD_STEPS).backward()
@@ -930,7 +929,7 @@ def train_distill():
 
     # Copy configuration files to make the model portable
     from litgpt.utils import copy_config_files
-    copy_config_files(Path("checkpoints/Qwen/Qwen3-0.6B"), CHECKPOINT_ROOT)
+    copy_config_files(Path("checkpoints/Qwen/Qwen3-1.7B"), CHECKPOINT_ROOT)
     print(f"Distilled model saved to: {CHECKPOINT_ROOT}")
 
     # --- 2. CAPTURE END TIME & LOG SUMMARY ---

@@ -15,7 +15,7 @@ export NCCL_DEBUG=INFO
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:512"
 
 # 3. Model and Data Paths
-STUDENT_PATH="checkpoints/Qwen/Qwen3-0.6B-moe-init/lit_model.pth"
+STUDENT_PATH="checkpoints/Qwen/Qwen3-1.7B-moe-init/lit_model.pth"
 TEACHER_PATH="checkpoints/Qwen/Qwen3-8B/lit_model.pth"
 DATA_PATH="data/train_bilingual_mixed_83k_agri65k.parquet"
 

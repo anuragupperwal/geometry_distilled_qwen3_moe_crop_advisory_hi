@@ -10,7 +10,7 @@ from pathlib import Path
 from comet import download_model, load_from_checkpoint
 
 
-INPUT_FILE = "results/evaluation_outputs/mix_test_2/predictions.csv"
+INPUT_FILE = "results/evaluation_outputs/01_04_run_test_80k_A45F72/predictions.csv"
 OUTPUT_DIR = Path(INPUT_FILE).parent
 
 # Load metrics
@@ -86,16 +86,19 @@ def compute_metrics():
         start_model = time.time()
 
         subset = df[df["model"] == model]
+        # avg_perplexity = subset["perplexity"].mean()
+        avg_log = np.log(subset["perplexity"]).mean()
+        avg_perplexity = np.exp(avg_log)
 
         preds = subset["prediction"].tolist()
         refs = subset["reference"].tolist()
 
         # BLEU
-        bleu_refs = [[r] for r in refs]
-        b = bleu.compute(predictions=preds, references=bleu_refs)
+        # bleu_refs = [[r] for r in refs]
+        # b = bleu.compute(predictions=preds, references=bleu_refs)
 
         # ROUGE
-        r = rouge.compute(predictions=preds, references=refs)
+        # r = rouge.compute(predictions=preds, references=refs)
 
         # BERTScore
         # BERTScore (Precision / Recall / F1)
@@ -103,8 +106,8 @@ def compute_metrics():
             predictions=preds,
             references=refs,
             model_type="xlm-roberta-large",
+            batch_size=32,
             lang="hi",
-            rescale_with_baseline=True
         )
 
         bert_precision = sum(bert["precision"]) / len(bert["precision"])
@@ -132,13 +135,13 @@ def compute_metrics():
 
         results.append({
             "Model": model,
-            "ROUGE-L": r["rougeL"],
             "BERTScore_P": bert_precision,
             "BERTScore_R": bert_recall,
             "BERTScore_F1": bert_f1,
             "TokenF1": token_f1_avg,
             "COMET": comet_score,
             "RouterEntropy": router_entropy,
+            "Perplexity": avg_perplexity,
             "Avg_Generation_Time_sec": avg_gen_time,
             "Total_Generation_Time_sec": total_gen_time,
             "Metric_Compute_Time_sec": metric_time
@@ -159,11 +162,10 @@ def compute_metrics():
     sns.set(style="whitegrid")
 
     metric_columns = [
-        "BLEU",
-        "ROUGE-L",
         "BERTScore_P",
         "BERTScore_R",
         "BERTScore_F1",
+        # "Perplexity",
         "TokenF1",
         "COMET",
         "RouterEntropy"
@@ -190,11 +192,10 @@ def compute_metrics():
 
 
     corr_metrics = [
-        "BLEU",
-        "ROUGE-L",
         "BERTScore_P",
         "BERTScore_R",
         "BERTScore_F1",
+        "Perplexity",
         "TokenF1",
         "COMET"
     ]
@@ -223,10 +224,10 @@ def compute_metrics():
     # GENERATION METRICS RADAR CHART
     # ---------------------------------------------------------
 
+    results_df["Perplexity_inv"] = 1 / results_df["Perplexity"]
     radar_metrics = [
-        "BLEU",
-        "ROUGE-L",
         "BERTScore_F1",
+        "Perplexity_inv",
         "TokenF1",
         "COMET"
     ]
@@ -271,6 +272,172 @@ def compute_metrics():
         OUTPUT_DIR / "generation_radar_plot.png"
     )
 
+    #all metrics
+    quality_metrics = [
+        "BERTScore_P",
+        "BERTScore_R",
+        "BERTScore_F1",
+        "TokenF1",
+        "COMET",
+        "RouterEntropy"
+    ]
+
+    melted_quality = results_df.melt(
+        id_vars="Model",
+        value_vars=quality_metrics
+    )
+
+    plt.figure(figsize=(12,6))
+
+    sns.barplot(
+        data=melted_quality,
+        x="variable",
+        y="value",
+        hue="Model"
+    )
+
+    plt.ylabel("Score")
+    plt.xlabel("Metric")
+
+    plt.xticks(rotation=40)
+
+    plt.tight_layout()
+
+    plt.savefig(
+        OUTPUT_DIR / "quality_metrics_plot.png",
+        dpi=300
+    )
+
+    # Perplexity plot
+    plt.figure(figsize=(6,5))
+
+    sns.barplot(
+        data=results_df,
+        x="Model",
+        y="Perplexity"
+    )
+
+    plt.title("Model Perplexity Comparison")
+    plt.ylabel("Perplexity (Lower is Better)")
+    plt.xlabel("Model")
+
+    plt.tight_layout()
+
+    plt.savefig(
+        OUTPUT_DIR / "perplexity_plot.png",
+        dpi=300
+    )
+
+
+    # Perplexity vs Quality scatter plot - tells Does lower perplexity → better advisory quality?
+    plt.figure(figsize=(6,5))
+
+    sns.scatterplot(
+        data=results_df,
+        x="Perplexity",
+        y="BERTScore_F1",
+        hue="Model",
+        s=150
+    )
+
+    plt.title("Perplexity vs Semantic Quality")
+
+    plt.tight_layout()
+
+    plt.savefig(
+        OUTPUT_DIR / "perplexity_vs_quality.png",
+        dpi=300
+    )
+    plt.close()
+
+    #table
+    latex_table = results_df[
+        [
+            "Model",
+            "BERTScore_F1",
+            "TokenF1",
+            "COMET",
+            "Perplexity",
+            "RouterEntropy"
+        ]
+    ].round(3)
+
+    with open(OUTPUT_DIR / "metrics_table.tex", "w") as f:
+        f.write(
+            latex_table.to_latex(
+                index=False,
+                float_format="%.3f",
+                column_format="lccccc",
+                escape=False,
+                bold_rows=False
+            )
+        )
+    
+    
+    plt.figure(figsize=(11,2.5))
+    plt.axis("off")
+
+    table_df = results_df[
+        [
+            "Model",
+            "BERTScore_P",
+            "BERTScore_R",
+            "BERTScore_F1",
+            "Perplexity",
+            "TokenF1",
+            "COMET"
+        ]
+    ].round(3)
+
+    table = plt.table(
+        cellText=table_df.round(3).values,
+        colLabels=table_df.columns,
+        loc="center",
+        cellLoc="center"
+    )
+
+    table.auto_set_font_size(False)
+    table.set_fontsize(11)
+    table.scale(1,1.5)
+
+    n_rows = len(table_df) + 1
+    n_cols = len(table_df.columns)
+
+    # Remove all borders first
+    for (row, col), cell in table.get_celld().items():
+        cell.set_edgecolor("black")
+        cell.set_linewidth(0)
+        cell.visible_edges = ""
+
+    # Top rule
+    for col in range(n_cols):
+        cell = table[(0, col)]
+        cell.visible_edges = "T"
+        cell.set_linewidth(1.5)
+
+    # Mid rule (under header)
+    for col in range(n_cols):
+        cell = table[(0, col)]
+        cell.visible_edges += "B"
+        cell.set_linewidth(1.0)
+
+    # Bottom rule
+    for col in range(n_cols):
+        cell = table[(n_rows-1, col)]
+        cell.visible_edges = "B"
+        cell.set_linewidth(1.5)
+
+    # Bold header
+    for col in range(n_cols):
+        table[(0, col)].get_text().set_weight("bold")
+
+    plt.savefig(
+        OUTPUT_DIR / "metrics_table.png",
+        dpi=300,
+        bbox_inches="tight"
+    )
+
+    plt.close()
 
 if __name__ == "__main__":
     compute_metrics()

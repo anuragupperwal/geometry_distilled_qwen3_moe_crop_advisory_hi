@@ -3,11 +3,14 @@ import re
 import time
 import torch
 import pandas as pd
-from tqdm import tqdm
+import math
 
+from tqdm import tqdm
 from litgpt.model import GPT
 from litgpt.config import Config
 from litgpt.tokenizer import Tokenizer
+
+import torch.nn.functional as F
 
 torch.set_float32_matmul_precision("high")
 
@@ -17,47 +20,23 @@ TEST_DATA = "data/test/extracted_100_rows.parquet"
 TOKENIZER_DIR = "checkpoints/Qwen/Qwen3-0.6B"
 
 MAX_NEW_TOKENS = 1024
-NUM_SAMPLES = 3
-OUTPUT_DIR = "results/evaluation_outputs/mix_test_2"
-
-# MODELS = {
-#     "Teacher": (
-#         "checkpoints/Qwen/Qwen3-8B/lit_model.pth",
-#         "Qwen3-8B"
-#     ),
-#     "Base": (
-#         "checkpoints/Qwen/Qwen3-0.6B/lit_model.pth",
-#         "Qwen3-0.6B"
-#     ),
-#     "Distilled": (
-#         "checkpoints/Qwen/Qwen3-0.6B-Agri-Distilled/16_03_run_test_80k_5DEB07_better_results/lit_model.pth",
-#         "Qwen3-0.6B-MoE"
-#     ),
-# }
+NUM_SAMPLES = 5
+OUTPUT_DIR = "results/evaluation_outputs/20_03_run_test_80k_EC0051"
 
 MODELS = {
-    "16_03": (
-        "checkpoints/Qwen/Qwen3-0.6B-Agri-Distilled/16_03_run_test_80k_5DEB07_better_results/lit_model.pth",
-        "Qwen3-0.6B-MoE"
-    ),
-    "20_03": (
-        "checkpoints/Qwen/Qwen3-0.6B-Agri-Distilled/20_03_run_test_80k_EC0051/epoch-2.pth",
-        "Qwen3-0.6B-MoE"
-    ),
-    "23_03": (
-        "checkpoints/Qwen/Qwen3-0.6B-Agri-Distilled/23_03_run_test_80k_1D76FE/epoch-2.pth",
-        "Qwen3-0.6B-MoE"
-    ),
-    "Base": (
-        "checkpoints/Qwen/Qwen3-0.6B/lit_model.pth",
-        "Qwen3-0.6B"
-    ),
-    "Teacher": (
+    "Teacher(qwen3-8B)": (
         "checkpoints/Qwen/Qwen3-8B/lit_model.pth",
         "Qwen3-8B"
     ),
+    "Base (qwen3-0.6B": (
+        "checkpoints/Qwen/Qwen3-0.6B/lit_model.pth",
+        "Qwen3-0.6B"
+    ),
+    "Distilled (qwen3-0.6B-MoE-Distilled)": (
+        "Geometry_Distilled_qwen3_moe_crop_advisory_hi/checkpoints/Qwen/Qwen3-0.6B-Agri-Distilled/20_03_run_test_80k_EC0051/lit_model.pth",
+        "Qwen3-0.6B-MoE"
+    ),
 }
-
 
 # ---------------------------------------------------------
 # CONFIG
@@ -105,6 +84,42 @@ def compute_router_entropy(model):
         return 0
 
     return sum(loads) / len(loads)
+
+
+def compute_perplexity(model, tokenizer, prompt, reference):
+
+    prompt_ids = tokenizer.encode(prompt, bos=True, eos=False).tolist()
+    answer_ids = tokenizer.encode(reference, bos=False, eos=True).tolist()
+
+    full_ids = torch.tensor(
+        prompt_ids + answer_ids,
+        device=DEVICE
+    ).unsqueeze(0)
+
+    with torch.no_grad():
+        logits = model(full_ids)
+
+    shift_logits = logits[:, :-1]
+    shift_labels = full_ids[:, 1:]
+
+    # create mask so loss only applies to answer tokens
+    mask = torch.zeros_like(shift_labels)
+
+    prompt_len = len(prompt_ids)
+
+    mask[:, prompt_len+1:] = 1
+
+    loss = F.cross_entropy(
+        shift_logits.reshape(-1, shift_logits.size(-1)),
+        shift_labels.reshape(-1),
+        reduction="none"
+    ).view(shift_labels.shape)
+
+    loss = (loss * mask).sum() / mask.sum()
+
+    ppl = math.exp(loss.item())
+
+    return ppl
 
 
 # ---------------------------------------------------------
@@ -243,7 +258,7 @@ def run_generation():
 
         model = GPT(config).to(DEVICE, dtype=torch.bfloat16)
 
-        weights = torch.load(ckpt, map_location=DEVICE)
+        weights = torch.load(ckpt, map_location=DEVICE, weights_only=True) 
 
         if "model_state_dict" in weights:
             weights = weights["model_state_dict"]
@@ -280,8 +295,17 @@ def run_generation():
             input_ids = tokenizer.encode(prompt, bos=True, eos=False).to(DEVICE).unsqueeze(0)
 
             # SAMPLE TIMER
-            start_sample_time = time.time()
 
+            ppl = compute_perplexity(
+                model,
+                tokenizer,
+                prompt,
+                row["advisory"]
+            )
+
+            start_sample_time = time.time()
+            
+            model.clear_kv_cache()
             with torch.no_grad():
                 output_ids = generate(model, input_ids, MAX_NEW_TOKENS, eos_id)
 
@@ -289,6 +313,8 @@ def run_generation():
 
             output = tokenizer.decode(output_ids[0])
             output = output.replace("<|im_end|>", "").replace("<|im_start|>", "").strip()
+
+            
 
             thought, advisory = split_thought_advisory(output)
 
@@ -304,6 +330,7 @@ def run_generation():
                 "prediction": advisory,
                 "raw_output": output,
                 "generation_time_sec": sample_time,
+                "perplexity": ppl,
                 "router_entropy": entropy
             })
 

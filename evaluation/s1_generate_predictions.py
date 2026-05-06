@@ -4,13 +4,17 @@ import time
 import torch
 import pandas as pd
 import math
+import gc
 
 from tqdm import tqdm
 from litgpt.model import GPT
 from litgpt.config import Config
 from litgpt.tokenizer import Tokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import torch.nn.functional as F
+
+
 
 torch.set_float32_matmul_precision("high")
 
@@ -19,24 +23,79 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 TEST_DATA = "data/test/extracted_100_rows.parquet"
 TOKENIZER_DIR = "checkpoints/Qwen/Qwen3-0.6B"
 
-MAX_NEW_TOKENS = 1024
-NUM_SAMPLES = 5
-OUTPUT_DIR = "results/evaluation_outputs/20_03_run_test_80k_EC0051"
+MAX_NEW_TOKENS = 2048
+NUM_SAMPLES = 50
+OUTPUT_DIR = "results/evaluation_outputs/9_model_eval"
+
+# MODELS = {
+#     "Teacher(qwen3-8B)": (
+#         "checkpoints/Qwen/Qwen3-8B/lit_model.pth",
+#         "Qwen3-8B"
+#     ),
+#     "Base (qwen3-0.6B": (
+#         "checkpoints/Qwen/Qwen3-0.6B/lit_model.pth",
+#         "Qwen3-0.6B"
+#     ),
+#     "Distilled (qwen3-0.6B-MoE-Distilled)": (
+#         "Geometry_Distilled_qwen3_moe_crop_advisory_hi/checkpoints/Qwen/Qwen3-0.6B-Agri-Distilled/20_03_run_test_80k_EC0051/lit_model.pth",
+#         "Qwen3-0.6B-MoE"
+#     ),
+# }
+
 
 MODELS = {
-    "Teacher(qwen3-8B)": (
-        "checkpoints/Qwen/Qwen3-8B/lit_model.pth",
-        "Qwen3-8B"
-    ),
-    "Base (qwen3-0.6B": (
-        "checkpoints/Qwen/Qwen3-0.6B/lit_model.pth",
-        "Qwen3-0.6B"
-    ),
-    "Distilled (qwen3-0.6B-MoE-Distilled)": (
-        "Geometry_Distilled_qwen3_moe_crop_advisory_hi/checkpoints/Qwen/Qwen3-0.6B-Agri-Distilled/20_03_run_test_80k_EC0051/lit_model.pth",
-        "Qwen3-0.6B-MoE"
-    ),
+    # ---------------- LITGPT ----------------
+    "Distilled(Qwen3-MoE)": {
+        "type": "litgpt",
+        "ckpt": "checkpoints/Qwen/Qwen3-0.6B-Agri-Distilled/20_03_run_test_80k_EC0051/lit_model.pth",
+        "config": "Qwen3-0.6B-MoE",
+        "tokenizer": "checkpoints/Qwen/Qwen3-0.6B"
+    },
+    "Teacher(Qwen3-8B)": {
+        "type": "litgpt",
+        "ckpt": "checkpoints/Qwen/Qwen3-8B/lit_model.pth",
+        "config": "Qwen3-8B",
+        "tokenizer": "checkpoints/Qwen/Qwen3-0.6B"
+    },
+    "Base(Qwen3-0.6B)": {
+        "type": "litgpt",
+        "ckpt": "checkpoints/Qwen/Qwen3-0.6B/lit_model.pth",
+        "config": "Qwen3-0.6B",
+        "tokenizer": "checkpoints/Qwen/Qwen3-0.6B"
+    },
+
+    # ---------------- HF MODELS ----------------
+    "Qwen3-1.7B": {
+        "type": "hf",
+        "repo": "Qwen/Qwen3-1.7B"
+    },
+    "Qwen3-4B": {
+        "type": "hf",
+        "repo": "Qwen/Qwen3-4B"
+    },
+    
+    "Llama-3.2-1B": {
+        "type": "hf",
+        "repo": "meta-llama/Llama-3.2-1B"
+    },
+
+    "TinyLlama-1.1B": {
+        "type": "hf",
+        "repo": "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    },
+
+    "SmolLM2-1.7B": {
+        "type": "hf",
+        "repo": "HuggingFaceTB/SmolLM2-1.7B"
+    },
+
+    "DeepSeek-R1-1.5B": {
+        "type": "hf",
+        "repo": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+    },
+
 }
+
 
 # ---------------------------------------------------------
 # CONFIG
@@ -45,10 +104,10 @@ MODELS = {
 def get_config(name):
     config = Config.from_name(name)
 
-    if "8B" in name:
-        config.n_embd = 4096
-        config.n_head = 32
-        config.intermediate_size = 12288
+    # if "8B" in name:
+    #     config.n_embd = 4096
+    #     config.n_head = 32
+    #     config.intermediate_size = 12288
 
     return config
 
@@ -107,7 +166,7 @@ def compute_perplexity(model, tokenizer, prompt, reference):
 
     prompt_len = len(prompt_ids)
 
-    mask[:, prompt_len+1:] = 1
+    mask[:, prompt_len:] = 1
 
     loss = F.cross_entropy(
         shift_logits.reshape(-1, shift_logits.size(-1)),
@@ -179,7 +238,7 @@ def generate(model, idx, max_new_tokens, eos_id):
 
     generated = []
 
-    temperature = 0.8
+    temperature = 0.7
     top_p = 0.9
     top_k = None
 
@@ -238,8 +297,8 @@ def run_generation():
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    tokenizer = Tokenizer(TOKENIZER_DIR)
-    eos_id = tokenizer.eos_id
+    # tokenizer = Tokenizer(TOKENIZER_DIR)
+    # eos_id = tokenizer.eos_id
 
     df = pd.read_parquet(TEST_DATA)
     df = df.head(NUM_SAMPLES)
@@ -248,24 +307,40 @@ def run_generation():
     predictions_log = []
     generation_time_log = []
 
-    for model_name, (ckpt, config_name) in MODELS.items():
+    for model_name, model_info in MODELS.items():
 
         print(f"\nRunning generation for {model_name}")
 
         start_model_time = time.time()
 
-        config = get_config(config_name)
+        if model_info["type"] == "litgpt":
 
-        model = GPT(config).to(DEVICE, dtype=torch.bfloat16)
+            tokenizer = Tokenizer(model_info["tokenizer"])
+            eos_id = tokenizer.eos_id
 
-        weights = torch.load(ckpt, map_location=DEVICE, weights_only=True) 
+            config = get_config(model_info["config"])
+            model = GPT(config).to(DEVICE, dtype=torch.bfloat16)
 
-        if "model_state_dict" in weights:
-            weights = weights["model_state_dict"]
+            weights = torch.load(model_info["ckpt"], map_location=DEVICE, weights_only=True)
 
-        model.load_state_dict(weights, strict=False)
+            if "model_state_dict" in weights:
+                weights = weights["model_state_dict"]
 
-        model.eval()
+            model.load_state_dict(weights, strict=False)
+            model.eval()
+
+
+        elif model_info["type"] == "hf":
+
+            tokenizer = AutoTokenizer.from_pretrained(model_info["repo"])
+
+            model = AutoModelForCausalLM.from_pretrained(
+                model_info["repo"],
+                torch_dtype=torch.bfloat16,
+                device_map="auto"
+            )
+
+            model.eval()
 
         for _, row in tqdm(df.iterrows(), total=len(df)):
 
@@ -292,26 +367,58 @@ def run_generation():
                 "<|im_start|>assistant\n<think>\n"
             )
 
-            input_ids = tokenizer.encode(prompt, bos=True, eos=False).to(DEVICE).unsqueeze(0)
+            if model_info["type"] == "hf":
+                prompt = f"""
+                    System: {row["system_instruction"]}
 
+                    User: {row["prompt"]}
+
+                    First think step-by-step.
+                    Then provide final advisory in Hindi.
+
+                    Format:
+                    Reasoning:
+                    Final Answer:
+                """
+
+            if model_info["type"] == "litgpt":
+                input_ids = tokenizer.encode(prompt, bos=True, eos=False).to(DEVICE).unsqueeze(0)
+            else:
+                hf_inputs = tokenizer(prompt, return_tensors="pt").to(DEVICE)
             # SAMPLE TIMER
 
-            ppl = compute_perplexity(
-                model,
-                tokenizer,
-                prompt,
-                row["advisory"]
-            )
+            #Perplexity only computed for litGPT models due to tokenizer alignment constraints
+            if model_info["type"] == "litgpt":
+                ppl = compute_perplexity(model, tokenizer, prompt, row["advisory"])
+            else:
+                ppl = None
 
             start_sample_time = time.time()
             
-            model.clear_kv_cache()
+            if model_info["type"] == "litgpt":
+                model.clear_kv_cache()
+
             with torch.no_grad():
-                output_ids = generate(model, input_ids, MAX_NEW_TOKENS, eos_id)
+                if model_info["type"] == "litgpt":
+                    output_ids = generate(model, input_ids, MAX_NEW_TOKENS, eos_id)
+                    output = tokenizer.decode(output_ids[0])
+
+                else:
+                    # hf_inputs = tokenizer(prompt, return_tensors="pt").to(DEVICE)
+
+                    outputs = model.generate(
+                        **hf_inputs,
+                        max_new_tokens=MAX_NEW_TOKENS,
+                        do_sample=True,
+                        temperature=0.8,
+                        top_p=0.9
+                    )
+
+                    output = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
             sample_time = time.time() - start_sample_time
 
-            output = tokenizer.decode(output_ids[0])
+            # output = tokenizer.decode(output_ids[0])
             output = output.replace("<|im_end|>", "").replace("<|im_start|>", "").strip()
 
             
@@ -319,7 +426,10 @@ def run_generation():
             thought, advisory = split_thought_advisory(output)
 
             # Router entropy
-            entropy = compute_router_entropy(model)
+            if model_info["type"] == "litgpt":
+                entropy = compute_router_entropy(model)
+            else:
+                entropy = None
 
             predictions_log.append({
                 "id": row["custom_id"],
@@ -346,6 +456,7 @@ def run_generation():
         })
 
         del model
+        gc.collect()
         torch.cuda.empty_cache()
 
     pd.DataFrame(predictions_log).to_csv(

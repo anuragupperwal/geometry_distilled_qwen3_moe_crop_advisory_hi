@@ -10,7 +10,7 @@ from pathlib import Path
 from comet import download_model, load_from_checkpoint
 
 
-INPUT_FILE = "results/evaluation_outputs/01_04_run_test_80k_A45F72/predictions.csv"
+INPUT_FILE = "results/evaluation_outputs/20_03_run_test_80k_EC0051/predictions.csv"
 OUTPUT_DIR = Path(INPUT_FILE).parent
 
 # Load metrics
@@ -65,6 +65,61 @@ def compute_comet(preds, refs):
     )
 
     return sum(scores["scores"]) / len(scores["scores"])
+
+
+#table renderer
+def save_table_png(df, filename, title=None):
+
+    plt.figure(figsize=(11, 2.5))
+    plt.axis("off")
+
+    table = plt.table(
+        cellText=df.values,
+        colLabels=df.columns,
+        loc="center",
+        cellLoc="center"
+    )
+
+    table.auto_set_font_size(False)
+    table.set_fontsize(11)
+    table.scale(1, 1.5)
+
+    n_rows = len(df) + 1
+    n_cols = len(df.columns)
+
+    for col in range(n_cols):
+        table.auto_set_column_width(col)
+    
+    # remove all borders
+    for (row, col), cell in table.get_celld().items():
+        cell.set_edgecolor("black")
+        cell.set_linewidth(0)
+        cell.visible_edges = ""
+
+    # top rule
+    for col in range(n_cols):
+        cell = table[(0, col)]
+        cell.visible_edges = "T"
+        cell.set_linewidth(1.5)
+
+    # mid rule
+    for col in range(n_cols):
+        cell = table[(0, col)]
+        cell.visible_edges += "B"
+        cell.set_linewidth(1.0)
+
+    # bottom rule
+    for col in range(n_cols):
+        cell = table[(n_rows-1, col)]
+        cell.visible_edges = "B"
+        cell.set_linewidth(1.5)
+
+    # bold header
+    for col in range(n_cols):
+        table[(0, col)].get_text().set_weight("bold")
+
+    plt.savefig(filename, dpi=300, bbox_inches="tight")
+    plt.close()
 
 
 # ---------------------------------------------------------
@@ -122,7 +177,7 @@ def compute_metrics():
         comet_score = compute_comet(preds, refs)
 
         # Router entropy (from generation step)
-        router_entropy = subset["router_entropy"].mean()
+        # router_entropy = subset["router_entropy"].mean()
 
         # Generation time stats
         avg_gen_time = subset["generation_time_sec"].mean()
@@ -140,7 +195,7 @@ def compute_metrics():
             "BERTScore_F1": bert_f1,
             "TokenF1": token_f1_avg,
             "COMET": comet_score,
-            "RouterEntropy": router_entropy,
+            # "RouterEntropy": router_entropy,
             "Perplexity": avg_perplexity,
             "Avg_Generation_Time_sec": avg_gen_time,
             "Total_Generation_Time_sec": total_gen_time,
@@ -148,7 +203,6 @@ def compute_metrics():
         })
 
     results_df = pd.DataFrame(results)
-
     results_df.to_csv(OUTPUT_DIR / "metrics.csv", index=False)
 
     total_time = time.time() - start_total
@@ -161,35 +215,133 @@ def compute_metrics():
 
     sns.set(style="whitegrid")
 
-    metric_columns = [
+
+    # -------------------------------
+    # 1. ONE PLOT PER METRIC (FIXED)
+    # -------------------------------
+
+    metrics_to_plot = [
         "BERTScore_P",
         "BERTScore_R",
         "BERTScore_F1",
-        # "Perplexity",
         "TokenF1",
-        "COMET",
-        "RouterEntropy"
     ]
 
-    melted = results_df.melt(
-        id_vars="Model",
-        value_vars=metric_columns
+    models = results_df["Model"].unique()
+
+    # color palette (highlight distilled)
+    # palette = {
+    #     m: ("#d62728" if "Distilled" in m else "#7f7f7f")
+    #     for m in models
+    # }
+
+    # distinct colors (stable mapping)
+    palette = dict(zip(models, sns.color_palette("tab10", len(models))))
+    
+    for metric in metrics_to_plot:
+        plt.figure(figsize=(10, 5))
+
+        sns.barplot(
+            data=results_df,
+            x="Model",
+            y=metric,
+            hue="Model",
+            palette=palette,
+            dodge=False,
+            legend=False
+        )
+
+        plt.title(f"{metric} Comparison")
+
+        # Remove x labels
+        plt.xticks([])
+        plt.xlabel("")
+
+        # Y-axis scaling fix
+        y_min = results_df[metric].min()
+        y_max = results_df[metric].max()
+        margin = 0.02
+        plt.ylim(y_min - margin, y_max + margin)
+
+        # Grid
+        plt.grid(axis="y", linestyle="--", alpha=0.4)
+
+        # Remove top/right border
+        sns.despine()
+
+        # Value labels
+        # for p in plt.gca().patches:
+        #     height = p.get_height()
+        #     plt.text(
+        #         p.get_x() + p.get_width()/2,
+        #         height + 0.002,
+        #         f"{height:.3f}",
+        #         ha="center",
+        #         va="bottom",
+        #         fontsize=8
+        #     )
+
+        # Legend
+        handles = [
+            plt.Rectangle((0,0),1,1, color=palette[m])
+            for m in models
+        ]
+
+        plt.legend(
+            handles,
+            models,
+            title="Model",
+            bbox_to_anchor=(1.05, 1),
+            loc="upper left"
+        )
+
+        plt.tight_layout()
+
+        plt.savefig(
+            OUTPUT_DIR / f"{metric}_comparison.png",
+            dpi=300
+        )
+
+        plt.close()
+        
+    # -------------------------------
+    # 2. PERPLEXITY (SEPARATE QWEN ONLY)
+    # -------------------------------
+
+    qwen_df = results_df[results_df["Model"].str.contains("qwen", case=False, na=False)]
+
+    if len(qwen_df) > 0:
+        plt.figure(figsize=(6, 5))
+
+        sns.barplot(
+        data=qwen_df,
+        x="Model",
+        y=metric,
+        hue="Model",
+        palette=palette,
+        dodge=False,
+        legend=False
     )
 
-    plt.figure(figsize=(12,6))
+    plt.xticks([])
 
-    sns.barplot(data=melted, x="variable", y="value", hue="Model")
+    handles = [
+        plt.Rectangle((0,0),1,1, color=palette[m])
+        for m in qwen_df["Model"]
+    ]
 
-    plt.xticks(rotation=45)
-
-    plt.tight_layout()
-
-    plt.savefig(
-        os.path.join(OUTPUT_DIR/ "evaluation_plot.png")
+    plt.legend(
+        handles,
+        qwen_df["Model"],
+        title="Model",
+        bbox_to_anchor=(1.05, 1),
+        loc="upper left"
     )
+        
 
-    print(f"saved at {OUTPUT_DIR}")
-
+    # -------------------------------
+    # 3. METRIC CORRELATION HEATMAP
+    # -------------------------------
 
     corr_metrics = [
         "BERTScore_P",
@@ -217,6 +369,47 @@ def compute_metrics():
 
     plt.savefig(
         OUTPUT_DIR / "metric_correlation_heatmap.png"
+    )
+
+    plt.close()
+
+
+    # -------------------------------
+    # 4. TABLE A (QUALITY METRICS)
+    # -------------------------------
+    table_quality = results_df[
+        [
+            "Model",
+            "BERTScore_P",
+            "BERTScore_R",
+            "BERTScore_F1",
+            "TokenF1",
+            "COMET"
+        ]
+    ].round(3)
+
+    table_quality.to_csv(OUTPUT_DIR / "table_quality.csv", index=False)
+
+    save_table_png(
+        table_quality,
+        OUTPUT_DIR / "table_quality.png",
+        title="Quality Metrics Comparison"
+    )
+
+    # -------------------------------
+    # 5. TABLE B (PERPLEXITY ONLY - QWEN)
+    # -------------------------------
+
+    table_ppl = qwen_df[
+        ["Model", "Perplexity"]
+    ].round(3)
+
+    table_ppl.to_csv(OUTPUT_DIR / "table_perplexity_qwen.csv", index=False)
+
+    save_table_png(
+        table_ppl,
+        OUTPUT_DIR / "table_perplexity_qwen.png",
+        title="Perplexity (Qwen Models Only)"
     )
 
 
@@ -279,7 +472,7 @@ def compute_metrics():
         "BERTScore_F1",
         "TokenF1",
         "COMET",
-        "RouterEntropy"
+        # "RouterEntropy"
     ]
 
     melted_quality = results_df.melt(
@@ -293,7 +486,10 @@ def compute_metrics():
         data=melted_quality,
         x="variable",
         y="value",
-        hue="Model"
+        hue="Model",
+        palette=palette,
+        dodge=False,
+        legend=False
     )
 
     plt.ylabel("Score")
@@ -309,17 +505,42 @@ def compute_metrics():
     )
 
     # Perplexity plot
+    ppl_df = results_df[
+            results_df["Model"].str.contains("qwen", case=False, na=False)
+        ].dropna(subset=["Perplexity"])
     plt.figure(figsize=(6,5))
 
     sns.barplot(
-        data=results_df,
+        data=ppl_df,
         x="Model",
-        y="Perplexity"
+        y="Perplexity",
+        hue="Model",
+        palette=palette,
+        dodge=False,
+        legend=False
     )
 
     plt.title("Model Perplexity Comparison")
     plt.ylabel("Perplexity (Lower is Better)")
-    plt.xlabel("Model")
+    plt.xticks([])
+    plt.xlabel("")
+
+    handles = [
+        plt.Rectangle((0,0),1,1, color=palette[m])
+        for m in ppl_df["Model"]
+    ]
+
+    plt.legend(
+        handles,
+        ppl_df["Model"],
+        title="Model",
+        bbox_to_anchor=(1.05, 1),
+        loc="upper left"
+    )
+
+    y_min = ppl_df["Perplexity"].min()
+    y_max = ppl_df["Perplexity"].max()
+    plt.ylim(y_min * 0.9, y_max * 1.1)
 
     plt.tight_layout()
 
@@ -327,6 +548,8 @@ def compute_metrics():
         OUTPUT_DIR / "perplexity_plot.png",
         dpi=300
     )
+
+    plt.close()
 
 
     # Perplexity vs Quality scatter plot - tells Does lower perplexity → better advisory quality?
@@ -358,7 +581,7 @@ def compute_metrics():
             "TokenF1",
             "COMET",
             "Perplexity",
-            "RouterEntropy"
+            # "RouterEntropy"
         ]
     ].round(3)
 

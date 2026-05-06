@@ -35,7 +35,7 @@ OUTPUT_DIR = "results/evaluation_outputs/9_model_eval"
 #     "Base (qwen3-0.6B": (
 #         "checkpoints/Qwen/Qwen3-0.6B/lit_model.pth",
 #         "Qwen3-0.6B"
-#     ),
+#     ), 
 #     "Distilled (qwen3-0.6B-MoE-Distilled)": (
 #         "Geometry_Distilled_qwen3_moe_crop_advisory_hi/checkpoints/Qwen/Qwen3-0.6B-Agri-Distilled/20_03_run_test_80k_EC0051/lit_model.pth",
 #         "Qwen3-0.6B-MoE"

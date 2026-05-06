@@ -173,7 +173,7 @@ def plot_training_metrics():
     
     #keep every 100th datapoint to avoid overly dense plot
     df = df.iloc[::100]
-    
+     
     # -------------------------------
     # 1. TOTAL LOSS
     # -------------------------------

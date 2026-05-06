@@ -205,6 +205,10 @@ Provides the visual proof of Expert Specialization for the thesis defense.
 pip install -e .
 
 
+* download model:
+    python -m scripts.download --repo_id Qwen/Qwen3-1.7B --checkpoint_dir /checkpoints/Qwen --model_name Qwen3-1.7B
+
+    
 * Surgery: Run 
     python -m scripts.upcycle_moe
 

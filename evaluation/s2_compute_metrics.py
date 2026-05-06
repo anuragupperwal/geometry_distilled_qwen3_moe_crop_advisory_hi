@@ -618,7 +618,7 @@ def compute_metrics():
         loc="center",
         cellLoc="center"
     )
-
+ 
     table.auto_set_font_size(False)
     table.set_fontsize(11)
     table.scale(1,1.5)
